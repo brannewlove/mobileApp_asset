@@ -1,0 +1,6 @@
+{
+  "appId": "com.antigravity.assetmanager",
+  "appName": "AssetManager",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}
