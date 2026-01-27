@@ -10,66 +10,47 @@ export const useAssetStore = defineStore('asset', {
         inspectionLogs: JSON.parse(localStorage.getItem('cached_inspection_logs') || '[]'),
         loading: false,
         error: null,
-        searchQuery: '',            // 검색 탭 전용
-        inspectionSearchQuery: '',  // 실사 탭 전용 (스캔 결과 확인용)
-        logSearchQuery: '',         // 기록 탭 전용 검색어 추가
-        referenceSearchQuery: '',   // 참고데이터(Trade) 전용 검색어
+        searchQuery: '',
+        inspectionSearchQuery: '',
+        logSearchQuery: '',
+        referenceSearchQuery: '',
         selectedDepartment: '전체',
         isAuthenticated: !!localStorage.getItem('google_access_token'),
         masterFiles: [],
         sessionFiles: [],
         scannedAssetIds: JSON.parse(localStorage.getItem('cached_scanned_ids') || '[]'),
-        tradeMemos: JSON.parse(localStorage.getItem('cached_trade_memos') || '{}'),
         lastMasterSync: localStorage.getItem('last_master_sync') || null,
-
-        // --- 알림 관련 상태 ---
-        toast: {
-            show: false,
-            message: '',
-            type: 'info' // 'info', 'success', 'error'
-        },
-
-        // --- 지연 저장 관련 상태 ---
-        isSyncing: false,      // 현재 구글 시트와 동기화 중인지 여부
-        lastSavedAt: null,     // 마지막으로 구글 시트에 저장된 시간
-        saveTimeout: null,     // 디바운스용 타이머 ID
-        referenceLimit: 20     // 참고데이터 표시 제한 (페이지네이션)
+        toast: { show: false, message: '', type: 'info' },
+        isSyncing: false,
+        lastSavedAt: null,
+        saveTimeout: null,
+        referenceLimit: 20
     }),
 
     getters: {
         scannedAssets: (state) => {
-            const assetsByNumber = new Map();
-            state.assets.forEach(a => {
-                if (a.asset_number) assetsByNumber.set(a.asset_number, a);
-            });
-
             let result = state.scannedAssetIds
-                .map(id => assetsByNumber.get(id))
+                .map(id => state.assets.find(a => a.assetNumber === id))
                 .filter(Boolean)
                 .reverse();
 
             if (state.inspectionSearchQuery) {
                 const q = state.inspectionSearchQuery.toLowerCase();
-                result = result.filter(a => (a.asset_number || '').toLowerCase().includes(q));
+                result = result.filter(a => a.assetNumber.toLowerCase().includes(q));
             }
             return result;
         },
 
         filteredAssets: (state) => {
             let result = state.assets;
-
             if (state.selectedDepartment !== '전체') {
                 result = result.filter(a => a.department === state.selectedDepartment);
             }
-
             if (state.searchQuery) {
                 const q = state.searchQuery.toLowerCase();
                 result = result.filter(a =>
-                    (a.asset_number || '').toLowerCase().includes(q) ||
-                    (a.userName || '').toLowerCase().includes(q) ||
-                    (a.in_user || '').toLowerCase().includes(q) ||
-                    (a.model_name || '').toLowerCase().includes(q) ||
-                    (a.serial_number || '').toLowerCase().includes(q)
+                    [a.assetNumber, a.userName, a.in_user, a.modelName, a.serial_number]
+                        .some(v => (v || '').toLowerCase().includes(q))
                 );
             }
             return result;
@@ -78,12 +59,10 @@ export const useAssetStore = defineStore('asset', {
         filteredLogs: (state) => {
             const logs = [...state.inspectionLogs].reverse();
             if (!state.logSearchQuery) return logs;
-
             const q = state.logSearchQuery.toLowerCase();
             return logs.filter(log =>
-                (log.assetNumber || '').toLowerCase().includes(q) ||
-                (log.from?.user || '').toLowerCase().includes(q) ||
-                (log.to?.user || '').toLowerCase().includes(q)
+                [log.assetNumber, log.from?.user, log.to?.user]
+                    .some(v => (v || '').toLowerCase().includes(q))
             );
         },
 
@@ -97,85 +76,52 @@ export const useAssetStore = defineStore('asset', {
                     user_name: ['username', '사용자', '성함', '성명', '이름', 'name', 'user'],
                     department: ['department', '부서', '소속', 'part', '팀', '팀명', '부서명']
                 };
-                const targets = (aliases[key] || [key.toLowerCase()]).map(t => t.toLowerCase().replace(/[\s_]/g, ''));
+                const targets = (aliases[key] || [key]).map(t => t.toLowerCase().replace(/[\s_]/g, ''));
                 const foundKey = Object.keys(obj).find(k => targets.includes(k.toLowerCase().replace(/[\s_]/g, '')));
                 return foundKey ? obj[foundKey] : null;
             };
 
-            // 1. Filter & Join User Info
             let logs = [...state.tradeLogs];
             if (state.referenceSearchQuery) {
                 const q = state.referenceSearchQuery.toLowerCase();
-                logs = logs.filter(log => {
-                    const vals = Object.values(log).map(v => (v || '').toString().toLowerCase());
-                    return vals.some(v => v.includes(q));
-                });
+                logs = logs.filter(log => Object.values(log).some(v => (v || '').toString().toLowerCase().includes(q)));
             }
 
-            const mappedLogs = logs.map(log => {
+            const groups = {};
+            logs.forEach(log => {
+                const assetNo = getVal(log, 'asset_number') || 'Unknown';
                 const cjId = getVal(log, 'cj_id');
-                const exUserId = getVal(log, 'ex_user'); // 이전 사용자 사번 추출
+                const exUserId = getVal(log, 'ex_user');
+                const user = state.users.find(u => getVal(u, 'cj_id')?.toString() === cjId?.toString());
+                const exUser = state.users.find(u => getVal(u, 'cj_id')?.toString() === exUserId?.toString());
 
-                const user = state.users.find(u => {
-                    const uid = getVal(u, 'cj_id');
-                    return uid && cjId && uid.toString().trim() === cjId.toString().trim();
-                });
-
-                const exUser = state.users.find(u => {
-                    const uid = getVal(u, 'cj_id');
-                    return uid && exUserId && uid.toString().trim() === exUserId.toString().trim();
-                });
-
-                return {
+                if (!groups[assetNo]) groups[assetNo] = [];
+                groups[assetNo].push({
                     ...log,
-                    _assetNo: getVal(log, 'asset_number') || 'Unknown',
+                    _assetNo: assetNo,
                     _dateStr: getVal(log, 'date') || '0000-00-00',
-                    _exUser: exUserId || '',
                     _exUserName: exUser ? getVal(exUser, 'user_name') : (exUserId || ''),
                     _exUserPart: exUser ? getVal(exUser, 'department') : '',
                     _joinedName: user ? getVal(user, 'user_name') : (cjId || ''),
                     _joinedPart: user ? getVal(user, 'department') : ''
-                };
+                });
             });
 
-
-            // 2. Group by Asset Number
-            const groups = {};
-            mappedLogs.forEach(log => {
-                if (!groups[log._assetNo]) groups[log._assetNo] = [];
-                groups[log._assetNo].push(log);
-            });
-
-            // 3. Sort logs within each group by date (ascending for sequential tracking)
-            // and sort groups by the latest log's date (descending)
-            const result = Object.entries(groups).map(([assetNo, items]) => {
-                const sortedItems = items.sort((a, b) => a._dateStr.localeCompare(b._dateStr));
-                return {
-                    assetNo,
-                    logs: sortedItems,
-                    lastUpdate: sortedItems[sortedItems.length - 1]._dateStr
-                };
-            }).sort((a, b) => b.lastUpdate.localeCompare(a.lastUpdate));
-
-            return result.slice(0, state.referenceLimit);
+            return Object.entries(groups).map(([assetNo, items]) => {
+                const sorted = items.sort((a, b) => a._dateStr.localeCompare(b._dateStr));
+                return { assetNo, logs: sorted, lastUpdate: sorted[sorted.length - 1]._dateStr };
+            }).sort((a, b) => b.lastUpdate.localeCompare(a.lastUpdate)).slice(0, state.referenceLimit);
         },
 
-        departments: (state) => {
-            const deps = new Set(state.assets.map(a => a.department).filter(Boolean));
-            return ['전체', ...Array.from(deps).sort()];
-        },
+        departments: (state) => ['전체', ...Array.from(new Set(state.assets.map(a => a.department).filter(Boolean))).sort()],
 
         userStats: (state) => {
             const stats = {};
             state.assets.forEach(a => {
-                const userId = a.in_user || 'unknown';
-                if (!stats[userId]) {
-                    stats[userId] = { done: 0, total: 0 };
-                }
-                stats[userId].total++;
-                if (a.status === 'checked') {
-                    stats[userId].done++;
-                }
+                const uid = a.in_user || 'unknown';
+                if (!stats[uid]) stats[uid] = { done: 0, total: 0 };
+                stats[uid].total++;
+                if (a.status === 'checked') stats[uid].done++;
             });
             return stats;
         },
@@ -183,11 +129,7 @@ export const useAssetStore = defineStore('asset', {
         progress: (state) => {
             const total = state.assets.length;
             const done = state.assets.filter(a => a.status === 'checked').length;
-            return {
-                total,
-                done,
-                percent: total > 0 ? Math.round((done / total) * 100) : 0
-            };
+            return { total, done, percent: total > 0 ? Math.round((done / total) * 100) : 0 };
         }
     },
 
@@ -385,10 +327,18 @@ export const useAssetStore = defineStore('asset', {
             try {
                 const user = await googleApi.signInWithGoogle();
                 const token = user.authentication.accessToken;
-                await this.initializeData(token);
+
+                if (token) {
+                    await this.initializeData(token);
+                    this.isAuthenticated = true; // 여기에 명시적으로 추가
+                    console.log('[Store] Login success, UI should update.');
+                } else {
+                    throw new Error('토큰을 발급받지 못했습니다.');
+                }
             } catch (err) {
                 console.error('Login Failed:', err);
                 this.error = '구글 로그인에 실패했습니다.';
+                this.showToast('로그인 실패: ' + err.message, 'error');
             } finally {
                 this.loading = false;
             }

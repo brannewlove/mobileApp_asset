@@ -1,4 +1,4 @@
-import { GoogleAuth } from '@codetrix-studio/capacitor-google-auth';
+import { SocialLogin } from '@capgo/capacitor-social-login';
 
 /**
  * Google API Bridge for Asset Management (REST API Version)
@@ -7,19 +7,48 @@ import { GoogleAuth } from '@codetrix-studio/capacitor-google-auth';
 export const googleApi = {
     // Folder ID where source asset spreadsheets are stored
     FOLDER_ID: '1FK2Opt907pBIsETpULcOWedY_X52pCy-',
+    accessToken: null,
     // Folder ID for backups (User needs to fill this)
     BACKUP_FOLDER_ID: '11hRf6h8ciyd7uXOZeeorR4XaXKKgqSfv',
-    accessToken: null,
+    CLIENT_ID: '876684580795-l4nj5d5k5uh111j7oc1a1seb7877mtg6.apps.googleusercontent.com',
+    SCOPES: [
+        'profile',
+        'email',
+        'https://www.googleapis.com/auth/drive.readonly',
+        'https://www.googleapis.com/auth/drive.file',
+        'https://www.googleapis.com/auth/spreadsheets'
+    ],
+
+    async initialize() {
+        await SocialLogin.initialize({
+            google: { webClientId: this.CLIENT_ID },
+        });
+    },
 
     async signInWithGoogle() {
         try {
-            await GoogleAuth.initialize({
-                clientId: '876684580795-l4nj5d5k5uh111j7oc1a1seb7877mtg6.apps.googleusercontent.com',
-            });
+            await this.initialize();
             // 안드로이드에서는 이미 로그인된 정보가 있다면 계정 선택 없이 즉시 토큰을 가져옵니다.
-            const user = await GoogleAuth.signIn();
-            this.accessToken = user.authentication.accessToken;
-            return user;
+            const response = await SocialLogin.login({
+                provider: 'google',
+                options: {
+                    scopes: this.SCOPES,
+                }
+            });
+
+            let token = '';
+            if (response.result && response.result.accessToken) {
+                token = typeof response.result.accessToken === 'string'
+                    ? response.result.accessToken
+                    : response.result.accessToken.token;
+            }
+            this.accessToken = token;
+
+            // 기존 코드 호환성을 위해 authentication 객체를 포함하여 반환합니다.
+            return {
+                ...response.result,
+                authentication: { accessToken: token }
+            };
         } catch (error) {
             console.error('Google Auth Error:', error);
             throw error;
@@ -32,8 +61,18 @@ export const googleApi = {
     async refreshAccessToken() {
         try {
             console.log('[GoogleAPI] Attempting silent token refresh...');
-            const user = await GoogleAuth.signIn();
-            this.accessToken = user.authentication.accessToken;
+            const response = await SocialLogin.login({
+                provider: 'google',
+                options: { scopes: this.SCOPES }
+            });
+
+            let token = '';
+            if (response.result && response.result.accessToken) {
+                token = typeof response.result.accessToken === 'string'
+                    ? response.result.accessToken
+                    : response.result.accessToken.token;
+            }
+            this.accessToken = token;
             localStorage.setItem('google_access_token', this.accessToken);
             console.log('[GoogleAPI] Token refreshed successfully.');
             return this.accessToken;
@@ -45,7 +84,7 @@ export const googleApi = {
 
     async signOutGoogle() {
         try {
-            await GoogleAuth.signOut();
+            await SocialLogin.logout({ provider: 'google' });
             this.accessToken = null;
         } catch (error) {
             console.error('Logout Error:', error);

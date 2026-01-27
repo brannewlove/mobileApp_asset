@@ -25,8 +25,10 @@ import {
   Scan,
   Info,
   AlertCircle,
-  ClipboardList
+  ClipboardList,
+  Crosshair
 } from 'lucide-vue-next'
+import AssetCard from './components/AssetCard.vue'
 
 const store = useAssetStore()
 const activeTab = ref('inspection')
@@ -92,6 +94,18 @@ const handleSearchInput = (e) => {
   }, 300)
 }
 
+const clearSearch = () => {
+  internalSearchQuery.value = ''
+  store.searchQuery = ''
+  displayLimit.value = pageSize
+  clearTimeout(debounceTimer)
+}
+
+const clearInspectionSearch = () => {
+  store.inspectionSearchQuery = ''
+  barcodeValue.value = ''
+}
+
 const selectedMaster = ref(null)
 
 // Ensure master is selected when files become available
@@ -127,6 +141,14 @@ onMounted(async () => {
       // Check if master sync is needed (Once a day after 06:00)
       store.checkAndSyncMaster()
     }
+  }
+})
+
+// 로그인이 완료되면 자동으로 로그인 화면 닫기
+watch(() => store.isAuthenticated, (val) => {
+  if (val) {
+    showLogin.value = false
+    showProjectSelector.value = true
   }
 })
 
@@ -451,71 +473,26 @@ const handleTrackAsset = (assetNumber) => {
           @keyup.enter="handleBarcodeEnter"
           autofocus
         />
-        <button v-if="store.inspectionSearchQuery" @click="store.inspectionSearchQuery = ''" class="clear-filter-btn">
+        <button v-if="store.inspectionSearchQuery || barcodeValue" @click="clearInspectionSearch" class="clear-filter-btn">
           <X size="18" />
         </button>
-        <button v-if="!store.inspectionSearchQuery && store.scannedAssets && store.scannedAssets.length > 0" @click="handleConfirm" class="confirm-btn">
+        <button v-if="!store.inspectionSearchQuery && !barcodeValue && store.scannedAssets && store.scannedAssets.length > 0" @click="handleConfirm" class="confirm-btn">
           비우기
         </button>
       </div>
 
       <div class="asset-list">
-        <div v-for="asset in store.scannedAssets" :key="asset.assetNumber" class="glass asset-card" :class="asset.status">
-          <div class="card-header">
-            <span class="asset-id">{{ asset.assetNumber }}</span>
-            <div class="header-right">
-              <div class="user-stats-stack">
-                <span class="user-progress-tag" v-if="store.userStats[asset.in_user]">
-                  {{ store.userStats[asset.in_user].done }}/{{ store.userStats[asset.in_user].total }}
-                </span>
-                <button class="track-btn" @click.stop="handleTrackAsset(asset.assetNumber)">추적</button>
-              </div>
-              <CheckCircle v-if="asset.status === 'checked'" class="status-icon checked" />
-            </div>
-          </div>
-          <div class="card-body">
-            <div class="info-row">
-              <User size="16" />
-              <span>{{ asset.userName }} ({{ asset.department }})</span>
-            </div>
-            <div class="info-row">
-              <Fingerprint size="16" />
-              <span class="text-muted">ID: {{ asset.in_user }}</span>
-            </div>
-            <div class="info-row" v-if="asset.category || (asset.model_name || asset.model)">
-              <Tag size="16" />
-              <span class="text-muted">{{ asset.category }}</span>
-              <span class="divider">|</span>
-              <Package size="16" />
-              <span class="text-muted">{{ asset.model_name || asset.model }}</span>
-            </div>
-            <div class="info-row" v-if="asset.serial_number">
-              <Hash size="16" />
-              <span class="text-muted">SN: {{ asset.serial_number }}</span>
-            </div>
-            <div class="info-row memo-row">
-              <Database size="16" />
-              <input 
-                class="memo-input" 
-                v-model="asset.note" 
-                placeholder="조사 메모 입력..." 
-                @blur="store.updateAssetNote(asset.assetNumber, asset.note)"
-              />
-            </div>
-            <div class="card-shortcuts">
-              <button @click.stop="handleQuickSearchUser(asset.in_user)" class="shortcut-btn">
-                <Search size="16" /> ID로 검색
-              </button>
-              <button @click.stop="handleQuickSearchDept(asset.department)" class="shortcut-btn">
-                <Filter size="16" /> 부서로 검색
-              </button>
-              <button v-if="asset.status.toLowerCase() === 'checked'" @click.stop="handleCancelCheck(asset.assetNumber)" class="shortcut-btn cancel-undo-btn">
-                <X size="16" /> 취소
-              </button>
-            </div>
-          </div>
-          <!-- card-actions removed -->
-        </div>
+        <AssetCard 
+          v-for="asset in store.scannedAssets" 
+          :key="asset.assetNumber" 
+          :asset="asset"
+          :user-stats="store.userStats"
+          @track="handleTrackAsset"
+          @search-user="handleQuickSearchUser"
+          @search-dept="handleQuickSearchDept"
+          @cancel-check="handleCancelCheck"
+          @update-note="store.updateAssetNote"
+        />
       </div>
     </div>
 
@@ -528,6 +505,9 @@ const handleTrackAsset = (assetNumber) => {
           @input="handleSearchInput" 
           placeholder="사용자, ID, 자산번호 검색" 
         />
+        <button v-if="internalSearchQuery" @click="clearSearch" class="clear-filter-btn">
+          <X size="18" />
+        </button>
       </div>
       
       <div class="dept-selector-trigger" @click="showDeptModal = true">
@@ -585,61 +565,17 @@ const handleTrackAsset = (assetNumber) => {
       </div>
 
       <div class="asset-list">
-        <div v-for="asset in visibleAssets" :key="asset.assetNumber" class="glass asset-card" :class="asset.status">
-          <div class="card-header">
-            <span class="asset-id">{{ asset.assetNumber }}</span>
-            <div class="header-right">
-              <div class="user-stats-stack">
-                <span class="user-progress-tag" v-if="store.userStats[asset.in_user]">
-                  {{ store.userStats[asset.in_user].done }}/{{ store.userStats[asset.in_user].total }}
-                </span>
-                <button class="track-btn" @click.stop="handleTrackAsset(asset.assetNumber)">추적</button>
-              </div>
-              <CheckCircle v-if="asset.status === 'checked'" class="status-icon checked" />
-            </div>
-          </div>
-          <div class="card-body">
-            <div class="info-row">
-              <User size="16" />
-              <span>{{ asset.userName }} ({{ asset.department }})</span>
-            </div>
-            <div class="info-row">
-              <Fingerprint size="16" />
-              <span class="text-muted">ID: {{ asset.in_user }}</span>
-            </div>
-            <div class="info-row" v-if="asset.category || (asset.model_name || asset.model)">
-              <Tag size="16" />
-              <span class="text-muted">{{ asset.category }}</span>
-              <span class="divider">|</span>
-              <Package size="16" />
-              <span class="text-muted">{{ asset.model_name || asset.model }}</span>
-            </div>
-            <div class="info-row" v-if="asset.serial_number">
-              <Hash size="16" />
-              <span class="text-muted">SN: {{ asset.serial_number }}</span>
-            </div>
-            <div class="info-row memo-row">
-              <Database size="16" />
-              <input 
-                class="memo-input" 
-                v-model="asset.note" 
-                placeholder="조사 메모 입력..." 
-                @blur="store.updateAssetNote(asset.assetNumber, asset.note)"
-              />
-            </div>
-            <div class="card-shortcuts">
-              <button @click.stop="handleQuickSearchUser(asset.in_user)" class="shortcut-btn">
-                <Search size="16" /> ID로 검색
-              </button>
-              <button @click.stop="handleQuickSearchDept(asset.department)" class="shortcut-btn">
-                <Filter size="16" /> 부서로 검색
-              </button>
-              <button v-if="asset.status.toLowerCase() === 'checked'" @click.stop="handleCancelCheck(asset.assetNumber)" class="shortcut-btn cancel-undo-btn">
-                <X size="16" /> 취소
-              </button>
-            </div>
-          </div>
-        </div>
+        <AssetCard 
+          v-for="asset in visibleAssets" 
+          :key="asset.assetNumber" 
+          :asset="asset"
+          :user-stats="store.userStats"
+          @track="handleTrackAsset"
+          @search-user="handleQuickSearchUser"
+          @search-dept="handleQuickSearchDept"
+          @cancel-check="handleCancelCheck"
+          @update-note="store.updateAssetNote"
+        />
 
         <!-- Load More Button -->
         <div v-if="displayLimit < store.filteredAssets.length" class="load-more-container">
@@ -655,7 +591,7 @@ const handleTrackAsset = (assetNumber) => {
         <Search class="icon" />
         <input 
           v-model="store.referenceSearchQuery" 
-          placeholder="기록(Trade) 통합 검색" 
+          placeholder="추적(Trade) 통합 검색" 
         />
         <button v-if="store.referenceSearchQuery" @click="store.referenceSearchQuery = ''" class="clear-filter-btn">
           <X size="18" />
@@ -664,8 +600,8 @@ const handleTrackAsset = (assetNumber) => {
 
       <div class="trade-log-container">
         <div v-if="store.filteredTradeLogs.length === 0" class="empty-state">
-          <History size="48" class="icon dimmed" />
-          <p>조회된 기록 데이터가 없습니다.</p>
+          <Crosshair size="48" class="icon dimmed" />
+          <p>조회된 추적 데이터가 없습니다.</p>
         </div>
         <div v-else class="trade-list">
           <!-- Group Card per Asset -->
@@ -747,7 +683,7 @@ const handleTrackAsset = (assetNumber) => {
       <div class="history-actions-grid">
         <button class="glass action-card save-backup" @click="handleBackupSave" :disabled="store.loading">
           <div class="action-icon">
-            <Save size="24" />
+            <Save size="20" />
           </div>
           <div class="action-info">
             <span class="action-title">내역 저장 및 백업</span>
@@ -757,17 +693,17 @@ const handleTrackAsset = (assetNumber) => {
 
         <button class="glass action-card sync-master" @click="handleSyncMaster" :disabled="store.loading">
           <div class="action-icon">
-            <RefreshCw size="24" />
+            <RefreshCw size="20" />
           </div>
           <div class="action-info">
             <span class="action-title">마스터 데이터 동기화</span>
-            <span class="action-desc">최 최신 인사정보 및 거래이력을 동기화합니다.</span>
+            <span class="action-desc">최신 인사정보 및 거래이력을 동기화합니다.</span>
           </div>
         </button>
         
         <button class="glass action-card logout" @click="handleLogout">
           <div class="action-icon">
-            <LogOut size="24" />
+            <LogOut size="20" />
           </div>
           <div class="action-info">
             <span class="action-title">로그아웃</span>
@@ -824,8 +760,8 @@ const handleTrackAsset = (assetNumber) => {
         <span>검색</span>
       </button>
       <button @click="activeTab = 'reference'" :class="{ active: activeTab === 'reference' }">
-        <History />
-        <span>기록</span>
+        <Crosshair />
+        <span>추적</span>
       </button>
       <button @click="activeTab = 'history'" :class="{ active: activeTab === 'history' }">
         <ClipboardList />
@@ -864,8 +800,9 @@ const handleTrackAsset = (assetNumber) => {
 
 <style scoped>
 .header {
-  margin: 16px;
-  padding: 16px;
+  margin: 0;
+  padding: calc(16px + env(safe-area-inset-top)) 16px 16px 16px;
+  border-radius: 0 0 24px 24px;
 }
 
 .header-top {
@@ -971,23 +908,25 @@ h1 {
 
 .content {
   flex: 1;
-  padding: 0 16px 80px 16px;
+  padding: 0 16px calc(110px + env(safe-area-inset-bottom)) 16px;
   overflow-y: auto;
 }
 
 .input-section, .search-section {
   display: flex;
   align-items: center;
-  padding: 8px 16px;
-  margin-bottom: 20px;
+  padding: 4px 12px;
+  margin-bottom: 12px;
+  min-height: 44px;
 }
 
 .input-section input, .search-section input {
   flex: 1;
   background: transparent;
   border: none;
-  font-size: 1rem;
+  font-size: 0.9rem;
   outline: none;
+  padding: 8px 0;
 }
 
 .icon {
@@ -999,91 +938,6 @@ h1 {
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-.asset-card {
-  padding: 16px;
-  transition: transform 0.2s;
-}
-
-.asset-card.checked {
-  border-left: 4px solid var(--secondary);
-}
-
-.asset-card.missing {
-  border-left: 4px solid var(--danger);
-  opacity: 0.6;
-}
-
-.card-header {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 8px;
-}
-
-.asset-id {
-  font-weight: bold;
-  color: var(--primary);
-}
-
-.info-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.9rem;
-  color: var(--text-muted);
-  margin-top: 4px;
-}
-
-.info-val {
-  flex: 1;
-}
-
-.card-shortcuts {
-  display: flex;
-  gap: 8px;
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
-  width: 100%;
-}
-
-.shortcut-btn {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 8px 4px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  transition: all 0.2s ease;
-  white-space: nowrap;
-}
-
-.cancel-undo-btn {
-  flex: 0.5;
-  color: #f87171 !important;
-  border-color: rgba(248, 113, 113, 0.2) !important;
-  background: rgba(248, 113, 113, 0.05) !important;
-}
-
-.cancel-undo-btn:active {
-  background: rgba(248, 113, 113, 0.1) !important;
-}
-
-.shortcut-btn:hover {
-  background: rgba(79, 70, 229, 0.1);
-  color: var(--primary);
-  border-color: var(--primary);
-  transform: translateY(-1px);
-}
-
-.shortcut-btn:active {
-  transform: scale(0.98);
 }
 
 .status-icon.checked {
@@ -1234,12 +1088,15 @@ h1 {
   bottom: 0;
   left: 0;
   right: 0;
-  height: 70px;
+  height: calc(42px + env(safe-area-inset-bottom));
+  padding-bottom: env(safe-area-inset-bottom);
   display: flex;
   justify-content: space-around;
   align-items: center;
-  border-radius: 20px 20px 0 0;
+  border-radius: 16px 16px 0 0;
   border-bottom: none;
+  z-index: 1000;
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.5);
 }
 
 .bottom-nav button {
@@ -1248,7 +1105,18 @@ h1 {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: 1px;
+}
+
+.bottom-nav button :deep(svg), 
+.bottom-nav button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.bottom-nav button span {
+  font-size: 0.65rem;
+  font-weight: 500;
 }
 
 .bottom-nav button.active {
@@ -1399,11 +1267,12 @@ h1 {
 .confirm-btn {
   background: var(--primary);
   color: white;
-  padding: 4px 12px;
-  font-size: 0.8rem;
-  margin-left: 8px;
-  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  margin-left: 6px;
+  border-radius: 6px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .clear-filter-btn {
@@ -1822,13 +1691,19 @@ h1 {
 }
 
 .action-icon {
-  width: 48px;
-  height: 48px;
-  border-radius: 14px;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-right: 16px;
+  margin-right: 12px;
+  flex-shrink: 0;
+}
+
+.action-icon svg {
+  width: 20px;
+  height: 20px;
 }
 
 .save-backup .action-icon {
