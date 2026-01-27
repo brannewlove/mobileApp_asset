@@ -1,3 +1,5 @@
+import { GoogleAuth } from '@codetrix-studio/capacitor-google-auth';
+
 /**
  * Google API Bridge for Asset Management (REST API Version)
  */
@@ -8,6 +10,47 @@ export const googleApi = {
     // Folder ID for backups (User needs to fill this)
     BACKUP_FOLDER_ID: '11hRf6h8ciyd7uXOZeeorR4XaXKKgqSfv',
     accessToken: null,
+
+    async signInWithGoogle() {
+        try {
+            await GoogleAuth.initialize({
+                clientId: '876684580795-l4nj5d5k5uh111j7oc1a1seb7877mtg6.apps.googleusercontent.com',
+            });
+            // 안드로이드에서는 이미 로그인된 정보가 있다면 계정 선택 없이 즉시 토큰을 가져옵니다.
+            const user = await GoogleAuth.signIn();
+            this.accessToken = user.authentication.accessToken;
+            return user;
+        } catch (error) {
+            console.error('Google Auth Error:', error);
+            throw error;
+        }
+    },
+
+    /**
+     * 무음 토큰 갱신: 사용자 개입 없이 배경에서 토큰만 새로 가져옵니다.
+     */
+    async refreshAccessToken() {
+        try {
+            console.log('[GoogleAPI] Attempting silent token refresh...');
+            const user = await GoogleAuth.signIn();
+            this.accessToken = user.authentication.accessToken;
+            localStorage.setItem('google_access_token', this.accessToken);
+            console.log('[GoogleAPI] Token refreshed successfully.');
+            return this.accessToken;
+        } catch (error) {
+            console.error('[GoogleAPI] Failed to refresh token silently:', error);
+            throw error;
+        }
+    },
+
+    async signOutGoogle() {
+        try {
+            await GoogleAuth.signOut();
+            this.accessToken = null;
+        } catch (error) {
+            console.error('Logout Error:', error);
+        }
+    },
 
     setToken(token) {
         this.accessToken = token;
@@ -65,18 +108,17 @@ export const googleApi = {
             const lowerTitle = title.toLowerCase().replace(/\s/g, '');
             let type = '';
 
-            // Inclusive mapping for "Assets"
-            // Strict mapping for primary "Assets" sheets
-            if (lowerTitle === 'assets' || lowerTitle === '자산현황' || lowerTitle === '자산' || lowerTitle === '현황' || lowerTitle === 'sheet1' || lowerTitle === '시트1') {
-                type = 'assets';
-            }
             // Inclusive mapping for "Users"
-            else if (lowerTitle.includes('user') || lowerTitle.includes('인사') || lowerTitle.includes('사용자') || lowerTitle.includes('사원')) {
+            if (lowerTitle.includes('users') || lowerTitle.includes('인사') || lowerTitle.includes('사용자') || lowerTitle.includes('사원')) {
                 type = 'users';
             }
             // Inclusive mapping for "Trade"
             else if (lowerTitle.includes('trade') || lowerTitle.includes('거래') || lowerTitle.includes('변동') || lowerTitle.includes('이력')) {
                 type = 'trade';
+            }
+            // Lenient mapping for primary "Assets" or data sheets
+            else if (lowerTitle === 'assets' || lowerTitle === '자산현황' || lowerTitle === '자산' || lowerTitle === '현황' || lowerTitle === 'sheet1' || lowerTitle === '시트1') {
+                type = 'assets';
             }
 
             if (!type) {
@@ -111,9 +153,22 @@ export const googleApi = {
     async updateSheet(sheetId, assets) {
         if (!this.accessToken) throw new Error('인증 토큰이 없습니다.');
 
+        // 1. 현재 스프레드시트의 실제 시트 목록 가져오기 (시트명 불일치 방지)
+        const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets(properties(title))`;
+        const metaRes = await fetch(metaUrl, {
+            headers: { 'Authorization': `Bearer ${this.accessToken}` }
+        });
+        const metaData = await metaRes.json();
+        const existingSheets = metaData.sheets.map(s => s.properties.title);
+        const firstSheet = existingSheets[0] || 'Sheet1';
+
         const sheetsToUpdate = {};
         assets.forEach(a => {
-            const name = a._sheetName || 'Sheet1';
+            // 자산에 기록된 시트명이 실제 존재하면 사용, 없으면 첫 번째 시트 사용
+            let name = a._sheetName;
+            if (!name || !existingSheets.includes(name)) {
+                name = firstSheet;
+            }
             if (!sheetsToUpdate[name]) sheetsToUpdate[name] = [];
             sheetsToUpdate[name].push(a);
         });
@@ -134,6 +189,8 @@ export const googleApi = {
 
             if (response.status === 401) throw new Error('[AUTH_EXPIRED] 토큰이 만료되었습니다.');
             if (!response.ok) {
+                const errDetail = await response.text();
+                console.error(`Update failed detail: ${errDetail}`);
                 throw new Error(`${sheetName} 시트 업데이트 실패: ${response.status}`);
             }
         }

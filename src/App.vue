@@ -21,7 +21,11 @@ import {
   Package,
   Save,
   Database,
-  Trash2
+  Trash2,
+  Scan,
+  Info,
+  AlertCircle,
+  ClipboardList
 } from 'lucide-vue-next'
 
 const store = useAssetStore()
@@ -30,6 +34,28 @@ const showDeptModal = ref(false)
 const showProjectSelector = ref(false)
 const sessionName = ref('')
 const deptSearchQuery = ref('')
+
+// --- 커스텀 확인 모달 상태 ---
+const confirmModal = ref({
+  show: false,
+  title: '확인',
+  message: '',
+  onConfirm: null
+})
+
+const openConfirm = (message, onConfirm, title = '확인') => {
+  confirmModal.value = {
+    show: true,
+    title,
+    message,
+    onConfirm
+  }
+}
+
+const triggerModalConfirm = () => {
+  if (confirmModal.value.onConfirm) confirmModal.value.onConfirm()
+  confirmModal.value.show = false
+}
 
 // Filtered department list for modal
 const filteredDeptList = computed(() => {
@@ -44,8 +70,12 @@ const pageSize = 20
 
 
 const loadMore = () => {
-  if (store.filteredAssets && displayLimit.value < store.filteredAssets.length) {
-    displayLimit.value += pageSize
+  if (activeTab.value === 'inspection' || activeTab.value === 'search') {
+    if (store.filteredAssets && displayLimit.value < store.filteredAssets.length) {
+      displayLimit.value += pageSize
+    }
+  } else if (activeTab.value === 'reference') {
+    store.referenceLimit += pageSize
   }
 }
 
@@ -76,12 +106,20 @@ let syncInterval = null
 // Auto-login on mount
 onMounted(async () => {
   const savedToken = localStorage.getItem('google_access_token')
-  if (savedToken) {
+    if (savedToken) {
     accessTokenInput.value = savedToken
     await store.initializeData(savedToken)
     if (store.isAuthenticated) {
       showLogin.value = false
-      showProjectSelector.value = true
+      
+      // 만약 로컬에 작업 중인 파일 정보가 있다면 선택 화면을 건너뜁니다.
+      if (store.currentFile) {
+        showProjectSelector.value = false
+        activeTab.value = 'inspection'
+      } else {
+        showProjectSelector.value = true
+      }
+
       if (!selectedMaster.value && store.masterFiles.length > 0) {
         selectedMaster.value = store.masterFiles[0]
       }
@@ -102,7 +140,10 @@ const accessTokenInput = ref('')
 const showLogin = ref(true)
 
 const handleLogin = async () => {
-  if (!accessTokenInput.value) return
+  if (!accessTokenInput.value) {
+    store.showToast('토큰을 입력해주세요.', 'error')
+    return
+  }
   await store.initializeData(accessTokenInput.value)
   if (store.isAuthenticated) {
     showLogin.value = false
@@ -159,7 +200,7 @@ const searchStats = computed(() => {
 
 const handleSyncMaster = async () => {
   await store.refreshMasterMetadata()
-  alert('마스터 데이터가 최신 상태로 동기화되었습니다.')
+  store.showToast('마스터 데이터가 최신 상태로 동기화되었습니다.', 'success')
 }
 
 const handleResumeSession = async (file) => {
@@ -171,11 +212,11 @@ const handleResumeSession = async (file) => {
 
 const handleStartSurvey = async () => {
   if (!sessionName.value) {
-    alert('회차명을 입력해주세요 (예: 2026년 정기조사)');
+    store.showToast('회차명을 입력해주세요.', 'error')
     return;
   }
   if (!selectedMaster.value) {
-    alert('마스터 데이터를 찾을 수 없습니다.');
+    store.showToast('마스터 데이터를 선택해주세요.', 'error')
     return;
   }
   await store.startSession(selectedMaster.value, sessionName.value)
@@ -184,11 +225,9 @@ const handleStartSurvey = async () => {
 }
 
 const handleLogout = () => {
-  localStorage.removeItem('google_access_token')
-  store.isAuthenticated = false
+  store.signOutAccount()
   showLogin.value = true
   showProjectSelector.value = false
-  store.currentFile = null
 }
 
 const handleSwitchSession = async () => {
@@ -218,29 +257,57 @@ const handleBarcodeEnter = async () => {
   if (!barcodeValue.value) return
   const asset = store.assets.find(a => a.assetNumber === barcodeValue.value)
   if (asset) {
-    store.updateAsset(barcodeValue.value, { status: 'checked' })
-    try {
-      await store.saveData()
-    } catch (saveError) {
-      console.warn('Auto-save failed:', saveError)
+    if (asset.status === 'checked') {
+      // 실사 탭 전용 검색어만 설정 (검색 탭에 영향 없음)
+      store.inspectionSearchQuery = barcodeValue.value
+      store.showToast(`이미 실사 완료된 자산입니다. (${barcodeValue.value})`, 'info')
+    } else {
+      store.inspectionSearchQuery = '' 
+      store.updateAsset(barcodeValue.value, { status: 'checked' })
+      store.triggerDebouncedSave()
+      store.showToast('실사 확인되었습니다.', 'success')
     }
   } else {
-    alert('등록되지 않은 자산입니다.')
+    store.showToast('등록되지 않은 자산입니다.', 'error')
   }
   barcodeValue.value = ''
 }
 
+const handleCancelCheck = (assetNumber) => {
+  openConfirm(
+    `자산(${assetNumber})의 실사를 취소하시겠습니까?`,
+    () => {
+      store.cancelAssetCheck(assetNumber)
+    },
+    '실사 취소'
+  )
+}
+
 const handleConfirm = () => {
   if (!store.scannedAssets || store.scannedAssets.length === 0) return
-  if (confirm('현재 실사한 리스트를 확인 완료 처리하고 목록에서 비우시겠습니까?')) {
-    store.clearScannedList()
-  }
+  openConfirm(
+    '현재 실사한 리스트를 확인 완료 처리하고 목록에서 비우시겠습니까?',
+    () => {
+      store.clearScannedList()
+      store.showToast('목록이 비워졌습니다.', 'success')
+    }
+  )
 }
 
 const handleBackupSave = async () => {
-  if (confirm('오늘 작업 내용을 저장하고 백업 파일을 생성하시겠습니까?')) {
-    await store.backupAndSave()
-  }
+  openConfirm(
+    '오늘 작업 내용을 저장하고 백업 파일을 생성하시겠습니까?',
+    async () => {
+      await store.backupAndSave()
+      store.showToast('백업이 완료되었습니다.', 'success')
+    }
+  )
+}
+const handleTrackAsset = (assetNumber) => {
+  store.referenceSearchQuery = assetNumber
+  activeTab.value = 'reference'
+  // 스크롤을 상단으로 올려주기 위해 (선택사항)
+  window.scrollTo(0, 0)
 }
 </script>
 
@@ -255,6 +322,16 @@ const handleBackupSave = async () => {
   <header class="glass header">
     <div class="header-top">
       <h1>Asset Manager</h1>
+      <div class="sync-status" :class="{ syncing: store.isSyncing }">
+        <template v-if="store.isSyncing">
+          <RefreshCw size="14" class="spin-icon" />
+          <span>저장 중...</span>
+        </template>
+        <template v-else-if="store.lastSavedAt">
+          <CheckCircle size="14" />
+          <span>{{ store.lastSavedAt }} 저장됨</span>
+        </template>
+      </div>
     </div>
     <div class="progress-container">
       <div class="progress-bar" :style="{ width: store.progress.percent + '%' }"></div>
@@ -267,15 +344,24 @@ const handleBackupSave = async () => {
     <div v-if="showLogin" class="tab-content login-screen">
       <div class="glass auth-card">
         <h3>Google API 인증</h3>
-        <p class="desc">구글 API를 사용하기 위해 Access Token을 입력해주세요.</p>
+        <p class="desc">구글 API를 사용하기 위해 아래 버튼으로 로그인하거나 Access Token을 직접 입력해주세요.</p>
+        
+        <!-- Native Google Login Button -->
+        <button @click="store.loginWithGoogle" :disabled="store.loading" class="primary-btn google-login-btn">
+          <Database size="18" class="btn-icon" />
+          {{ store.loading ? '로그인 중...' : '구글 계정으로 로그인' }}
+        </button>
+
+        <div class="divider-text">또는</div>
+
         <div class="input-group">
           <input 
             v-model="accessTokenInput" 
             type="password" 
-            placeholder="Google Access Token 입력" 
+            placeholder="Google Access Token 직접 입력" 
           />
-          <button @click="handleLogin" :disabled="store.loading" class="primary-btn">
-            {{ store.loading ? '연결 중...' : '인증 및 조회' }}
+          <button @click="handleLogin" :disabled="store.loading" class="secondary-btn">
+            토큰으로 인증
           </button>
         </div>
         <p class="help text-muted">
@@ -365,7 +451,10 @@ const handleBackupSave = async () => {
           @keyup.enter="handleBarcodeEnter"
           autofocus
         />
-        <button v-if="store.scannedAssets && store.scannedAssets.length > 0" @click="handleConfirm" class="confirm-btn">
+        <button v-if="store.inspectionSearchQuery" @click="store.inspectionSearchQuery = ''" class="clear-filter-btn">
+          <X size="18" />
+        </button>
+        <button v-if="!store.inspectionSearchQuery && store.scannedAssets && store.scannedAssets.length > 0" @click="handleConfirm" class="confirm-btn">
           비우기
         </button>
       </div>
@@ -375,9 +464,12 @@ const handleBackupSave = async () => {
           <div class="card-header">
             <span class="asset-id">{{ asset.assetNumber }}</span>
             <div class="header-right">
-              <span class="user-progress-tag" v-if="store.userStats[asset.in_user]">
-                {{ store.userStats[asset.in_user].done }}/{{ store.userStats[asset.in_user].total }}
-              </span>
+              <div class="user-stats-stack">
+                <span class="user-progress-tag" v-if="store.userStats[asset.in_user]">
+                  {{ store.userStats[asset.in_user].done }}/{{ store.userStats[asset.in_user].total }}
+                </span>
+                <button class="track-btn" @click.stop="handleTrackAsset(asset.assetNumber)">추적</button>
+              </div>
               <CheckCircle v-if="asset.status === 'checked'" class="status-icon checked" />
             </div>
           </div>
@@ -416,6 +508,9 @@ const handleBackupSave = async () => {
               </button>
               <button @click.stop="handleQuickSearchDept(asset.department)" class="shortcut-btn">
                 <Filter size="16" /> 부서로 검색
+              </button>
+              <button v-if="asset.status.toLowerCase() === 'checked'" @click.stop="handleCancelCheck(asset.assetNumber)" class="shortcut-btn cancel-undo-btn">
+                <X size="16" /> 취소
               </button>
             </div>
           </div>
@@ -494,9 +589,12 @@ const handleBackupSave = async () => {
           <div class="card-header">
             <span class="asset-id">{{ asset.assetNumber }}</span>
             <div class="header-right">
-              <span class="user-progress-tag" v-if="store.userStats[asset.in_user]">
-                {{ store.userStats[asset.in_user].done }}/{{ store.userStats[asset.in_user].total }}
-              </span>
+              <div class="user-stats-stack">
+                <span class="user-progress-tag" v-if="store.userStats[asset.in_user]">
+                  {{ store.userStats[asset.in_user].done }}/{{ store.userStats[asset.in_user].total }}
+                </span>
+                <button class="track-btn" @click.stop="handleTrackAsset(asset.assetNumber)">추적</button>
+              </div>
               <CheckCircle v-if="asset.status === 'checked'" class="status-icon checked" />
             </div>
           </div>
@@ -536,6 +634,9 @@ const handleBackupSave = async () => {
               <button @click.stop="handleQuickSearchDept(asset.department)" class="shortcut-btn">
                 <Filter size="16" /> 부서로 검색
               </button>
+              <button v-if="asset.status.toLowerCase() === 'checked'" @click.stop="handleCancelCheck(asset.assetNumber)" class="shortcut-btn cancel-undo-btn">
+                <X size="16" /> 취소
+              </button>
             </div>
           </div>
         </div>
@@ -548,7 +649,77 @@ const handleBackupSave = async () => {
         </div>
       </div>
     </div>
-    <!-- History Tab -->
+    <!-- Records (Trade Logs) Tab -->
+    <div v-if="!showLogin && !showProjectSelector && activeTab === 'reference'" class="tab-content">
+      <div class="glass search-section log-search">
+        <Search class="icon" />
+        <input 
+          v-model="store.referenceSearchQuery" 
+          placeholder="기록(Trade) 통합 검색" 
+        />
+        <button v-if="store.referenceSearchQuery" @click="store.referenceSearchQuery = ''" class="clear-filter-btn">
+          <X size="18" />
+        </button>
+      </div>
+
+      <div class="trade-log-container">
+        <div v-if="store.filteredTradeLogs.length === 0" class="empty-state">
+          <History size="48" class="icon dimmed" />
+          <p>조회된 기록 데이터가 없습니다.</p>
+        </div>
+        <div v-else class="trade-list">
+          <!-- Group Card per Asset -->
+          <div v-for="group in store.filteredTradeLogs" :key="group.assetNo" class="glass asset-history-card">
+            <div class="history-card-header">
+              <div class="asset-badge">
+                <Package size="16" />
+                <span class="asset-no">{{ group.assetNo }}</span>
+              </div>
+              <span class="history-count">변경 {{ group.logs.length }}건</span>
+            </div>
+
+            <div class="history-timeline">
+              <div v-for="(log, lIdx) in group.logs" :key="lIdx" class="timeline-item">
+                <div class="timeline-meta">
+                  <span class="timeline-date">{{ store._getVal(log, 'timestamp') || store._getVal(log, 'date') || store._getVal(log, '업무일자') }}</span>
+                </div>
+                
+                <div class="timeline-content">
+                  <div class="movement">
+                    <div class="move-item from">
+                      <span class="move-label">이전</span>
+                      <div class="move-val-group left-align">
+                        <span class="move-val highlight">{{ log._exUserName || '없음' }}</span>
+                        <span class="move-sub">{{ log._exUserPart }}</span>
+                      </div>
+                    </div>
+                    <div class="move-arrow">
+                      <ChevronRight size="14" />
+                    </div>
+                    <div class="move-item to">
+                      <span class="move-label">신규</span>
+                      <div class="move-val-group">
+                        <span class="move-val highlight">{{ log._joinedName || '알수없음' }}</span>
+                        <span class="move-sub">{{ log._joinedPart }}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Load More for Reference -->
+        <div v-if="activeTab === 'reference' && store.referenceLimit < store.tradeLogs.length" class="load-more-container">
+          <button @click="loadMore" class="glass load-more-btn">
+             데이터 더 보기
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Session History Tab -->
     <div v-if="!showLogin && !showProjectSelector && activeTab === 'history'" class="tab-content">
       <div class="glass session-info-bar" @click="handleSwitchSession">
         <div class="session-meta">
@@ -558,6 +729,18 @@ const handleBackupSave = async () => {
           </span>
         </div>
         <button class="switch-session-btn">회차 전환</button>
+      </div>
+
+      <!-- History Search - Moved to top for visibility -->
+      <div class="glass search-section log-search">
+        <Search class="icon" />
+        <input 
+          v-model="store.logSearchQuery" 
+          placeholder="자산번호 또는 이름으로 히스토리 검색" 
+        />
+        <button v-if="store.logSearchQuery" @click="store.logSearchQuery = ''" class="clear-filter-btn">
+          <X size="18" />
+        </button>
       </div>
 
       <!-- Settings / System Actions Section -->
@@ -578,7 +761,7 @@ const handleBackupSave = async () => {
           </div>
           <div class="action-info">
             <span class="action-title">마스터 데이터 동기화</span>
-            <span class="action-desc">최신 자산 목록을 불러와 현재 회차에 합칩니다.</span>
+            <span class="action-desc">최 최신 인사정보 및 거래이력을 동기화합니다.</span>
           </div>
         </button>
         
@@ -593,16 +776,19 @@ const handleBackupSave = async () => {
         </button>
       </div>
 
-      <div v-if="store.inspectionLogs.length === 0" class="empty-state">
-        <History size="48" class="icon dimmed" />
-        <p>현재 세션에서 발생한 변동 내역이 없습니다.</p>
+      <div v-if="store.filteredLogs.length === 0" class="empty-state">
+        <ClipboardList size="48" class="icon dimmed" />
+        <p>{{ store.logSearchQuery ? '검색 결과가 없습니다.' : '현재 세션에서 발생한 변동 내역이 없습니다.' }}</p>
         <span class="sub">사용자나 부서가 변경된 자산이 여기에 표시됩니다.</span>
       </div>
 
       <div v-else class="log-list">
-        <div v-for="(log, idx) in [...store.inspectionLogs].reverse()" :key="idx" class="glass log-card">
+        <div v-for="(log, idx) in store.filteredLogs" :key="idx" class="glass log-card">
           <div class="log-header">
-            <span class="log-asset">{{ log.assetNumber }}</span>
+            <div class="log-asset-group">
+              <span class="log-asset">{{ log.assetNumber }}</span>
+              <span v-if="log.reason === 'Master Sync'" class="log-reason-tag">마스터 동기화</span>
+            </div>
             <div class="log-time">{{ new Date(log.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) }}</div>
           </div>
           <div class="log-body">
@@ -627,20 +813,53 @@ const handleBackupSave = async () => {
     </div>
   </main>
 
-  <nav class="glass bottom-nav">
-    <button :class="{ active: activeTab === 'inspection' }" @click="activeTab = 'inspection'">
-      <Barcode />
-      <span>실사</span>
-    </button>
-    <button :class="{ active: activeTab === 'search' }" @click="activeTab = 'search'">
-      <Search />
-      <span>검색</span>
-    </button>
-    <button :class="{ active: activeTab === 'history' }" @click="activeTab = 'history'">
-      <History />
-      <span>기록</span>
-    </button>
-  </nav>
+    <!-- Bottom Navigation -->
+    <nav class="glass bottom-nav">
+      <button @click="activeTab = 'inspection'" :class="{ active: activeTab === 'inspection' }">
+        <Barcode />
+        <span>실사</span>
+      </button>
+      <button @click="activeTab = 'search'" :class="{ active: activeTab === 'search' }">
+        <Search />
+        <span>검색</span>
+      </button>
+      <button @click="activeTab = 'reference'" :class="{ active: activeTab === 'reference' }">
+        <History />
+        <span>기록</span>
+      </button>
+      <button @click="activeTab = 'history'" :class="{ active: activeTab === 'history' }">
+        <ClipboardList />
+        <span>히스토리</span>
+      </button>
+    </nav>
+
+    <!-- Global Confirm Modal -->
+    <Transition name="fade">
+      <div v-if="confirmModal.show" class="modal-overlay">
+        <div class="glass confirm-modal">
+          <div class="modal-body">
+            <h3>{{ confirmModal.title }}</h3>
+            <p>{{ confirmModal.message }}</p>
+          </div>
+          <div class="modal-actions">
+            <button @click="confirmModal.show = false" class="cancel-btn">취소</button>
+            <button @click="triggerModalConfirm" class="confirm-btn-final">확인</button>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- Global Toast Notification -->
+    <Transition name="toast">
+      <div v-if="store.toast.show" class="toast-overlay">
+        <div class="glass toast" :class="store.toast.type">
+          <Info v-if="store.toast.type === 'info'" size="18" />
+          <CheckCircle v-else-if="store.toast.type === 'success'" size="18" />
+          <AlertCircle v-else size="18" />
+          <span>{{ store.toast.message }}</span>
+        </div>
+      </div>
+    </Transition>
 </template>
 
 <style scoped>
@@ -731,6 +950,25 @@ h1 {
   font-weight: 600;
 }
 
+.sync-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.05);
+  padding: 4px 10px;
+  border-radius: 20px;
+}
+
+.sync-status.syncing {
+  color: var(--secondary);
+}
+
+.spin-icon {
+  animation: spin 2s linear infinite;
+}
+
 .content {
   flex: 1;
   padding: 0 16px 80px 16px;
@@ -803,10 +1041,11 @@ h1 {
 
 .card-shortcuts {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   margin-top: 12px;
   padding-top: 12px;
   border-top: 1px solid rgba(255, 255, 255, 0.05);
+  width: 100%;
 }
 
 .shortcut-btn {
@@ -814,15 +1053,26 @@ h1 {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 10px;
+  gap: 6px;
+  padding: 8px 4px;
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
-  font-size: 0.85rem;
-  font-weight: 600;
+  border-radius: 8px;
+  font-size: 0.75rem;
   color: var(--text-muted);
-  transition: all 0.2s;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.cancel-undo-btn {
+  flex: 0.5;
+  color: #f87171 !important;
+  border-color: rgba(248, 113, 113, 0.2) !important;
+  background: rgba(248, 113, 113, 0.05) !important;
+}
+
+.cancel-undo-btn:active {
+  background: rgba(248, 113, 113, 0.1) !important;
 }
 
 .shortcut-btn:hover {
@@ -1039,10 +1289,43 @@ h1 {
   color: white;
   padding: 12px;
   font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border-radius: 12px;
 }
 
-.primary-btn:disabled {
-  opacity: 0.5;
+.secondary-btn {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+  padding: 12px;
+  font-weight: 600;
+  border-radius: 12px;
+  border: 1px solid var(--border-glass);
+}
+
+.google-login-btn {
+  background: #ffffff;
+  color: #1f2937;
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.divider-text {
+  margin: 16px 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.divider-text::before, .divider-text::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .help {
@@ -1084,6 +1367,30 @@ h1 {
   color: var(--text-muted);
 }
 
+.user-stats-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.track-btn {
+  background: rgba(79, 70, 229, 0.1);
+  color: var(--primary);
+  border: 1px solid rgba(79, 70, 229, 0.2);
+  padding: 2px 8px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.track-btn:active {
+  background: var(--primary);
+  color: white;
+}
+
 .divider {
   margin: 0 4px;
   opacity: 0.3;
@@ -1097,6 +1404,17 @@ h1 {
   margin-left: 8px;
   border-radius: 8px;
   font-weight: 600;
+}
+
+.clear-filter-btn {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+  padding: 6px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 8px;
 }
 
 .load-more-container {
@@ -1204,16 +1522,131 @@ h1 {
   opacity: 0.5;
 }
 
-.move-item.to .move-val {
-  color: var(--secondary);
+/* Trade Log Styles */
+.trade-log-container {
+  padding-bottom: 20px;
 }
 
-.memo-row {
-  margin-top: 12px !important;
-  padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+.trade-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.trade-card {
+  padding: 16px;
+  border-radius: 20px;
+}
+
+.asset-history-card {
+  padding: 16px;
+  border-radius: 20px;
+  margin-bottom: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.history-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.asset-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(79, 70, 229, 0.1);
+  padding: 4px 12px;
+  border-radius: 12px;
+  color: var(--primary);
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.history-count {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.history-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  position: relative;
+  padding-left: 8px;
+}
+
+.timeline-item {
+  position: relative;
+  padding-left: 16px;
+  border-left: 2px solid rgba(255, 255, 255, 0.05);
+}
+
+.timeline-item::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--primary);
+  opacity: 0.6;
+}
+
+.timeline-meta {
+  margin-bottom: 6px;
+}
+
+.timeline-date {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.move-val-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+}
+
+.move-val-group.left-align {
+  align-items: flex-start;
+  text-align: left;
+}
+
+.move-val.highlight {
+  font-weight: 700;
+  color: #a78bfa; /* Light purple to match theme */
+  font-size: 0.95rem;
+}
+
+.move-sub {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.log-search {
+  margin-bottom: 16px !important;
+}
+
+.log-asset-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.log-reason-tag {
+  background: rgba(167, 139, 250, 0.2);
+  color: #a78bfa;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 0.65rem;
+  font-weight: 600;
 }
 
 .memo-input {
@@ -1631,5 +2064,132 @@ h1 {
   padding: 2px 6px;
   border-radius: 4px;
   font-weight: bold;
+}
+/* Global Modal Styles */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 10000;
+}
+
+.confirm-modal {
+  width: 100%;
+  max-width: 320px;
+  padding: 24px;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  text-align: center;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+}
+
+.modal-body h3 {
+  margin: 0 0 12px 0;
+  font-size: 1.25rem;
+  color: white;
+}
+
+.modal-body p {
+  margin: 0 0 24px 0;
+  font-size: 0.95rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.modal-actions button {
+  flex: 1;
+  padding: 14px;
+  border-radius: 14px;
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.cancel-btn {
+  background: rgba(255, 255, 255, 0.05);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.confirm-btn-final {
+  background: var(--primary);
+  color: white;
+  border: none;
+}
+
+/* Transiton: Fade */
+.fade-enter-active, .fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+
+.fade-enter-from, .fade-leave-to {
+  opacity: 0;
+}
+
+.fade-enter-active .confirm-modal {
+  animation: modalIn 0.3s ease-out;
+}
+
+@keyframes modalIn {
+  from { transform: scale(0.9) translateY(20px); opacity: 0; }
+  to { transform: scale(1) translateY(0); opacity: 1; }
+}
+
+/* Toast Animation & Styles */
+.toast-overlay {
+  position: fixed;
+  bottom: 100px;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.toast {
+  padding: 12px 20px;
+  border-radius: 30px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  font-weight: 500;
+  animation: slideUp 0.3s ease-out;
+}
+
+.toast.success { border-left: 4px solid var(--secondary); }
+.toast.error { border-left: 4px solid #f87171; }
+.toast.info { border-left: 4px solid var(--primary); }
+
+.toast-enter-active, .toast-leave-active {
+  transition: all 0.3s ease;
+}
+
+.toast-enter-from, .toast-leave-to {
+  opacity: 0;
+  transform: translateY(20px);
+}
+
+@keyframes slideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 </style>

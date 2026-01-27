@@ -2,5 +2,15 @@
   "appId": "com.antigravity.assetmanager",
   "appName": "AssetManager",
   "webDir": "dist",
-  "bundledWebRuntime": false
+  "bundledWebRuntime": false,
+  "plugins": {
+    "GoogleAuth": {
+      "scopes": [
+        "profile",
+        "email"
+      ],
+      "serverClientId": "876684580795-l4nj5d5k5uh111j7oc1a1seb7877mtg6.apps.googleusercontent.com",
+      "forceCodeForRefreshToken": true
+    }
+  }
 }
