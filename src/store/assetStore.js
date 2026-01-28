@@ -484,13 +484,18 @@ export const useAssetStore = defineStore('asset', {
 
         async refreshGlobalTradeLogs() {
             try {
+                console.log('[Store] refreshGlobalTradeLogs called');
                 const logs = await googleApi.fetchGlobalTradeLogs();
+                console.log(`[Store] Logs received: ${logs.length}`);
                 if (logs && logs.length > 0) {
                     this.globalTradeLogs = logs;
                     localStorage.setItem('cached_global_trade_logs', JSON.stringify(this.globalTradeLogs));
+                    console.log('[Store] Global trade logs updated in state and storage');
+                } else {
+                    console.warn('[Store] No logs returned from API');
                 }
             } catch (err) {
-                console.warn('[Store] Failed to fetch global trade logs:', err);
+                console.error('[Store] Failed to fetch global trade logs:', err);
             }
         },
 

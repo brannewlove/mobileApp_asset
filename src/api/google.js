@@ -338,11 +338,30 @@ export const googleApi = {
 
         if (searchData.files && searchData.files.length > 0) {
             const fileId = searchData.files[0].id;
-            // Get the first sheet name (could be 'Sheet1' or '시트1' depending on locale)
+            // Get the first sheet name
             const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${fileId}?fields=sheets(properties(title))`;
             const metaRes = await fetch(metaUrl, { headers: { 'Authorization': `Bearer ${this.accessToken}` } });
             const metaData = await metaRes.json();
             const sheetTitle = metaData.sheets[0].properties.title;
+
+            // Check if headers exist
+            const getUrl = `https://sheets.googleapis.com/v4/spreadsheets/${fileId}/values/${encodeURIComponent(sheetTitle)}!A1:Z1`;
+            const getRes = await fetch(getUrl, { headers: { 'Authorization': `Bearer ${this.accessToken}` } });
+            const getData = await getRes.json();
+
+            if (!getData.values || getData.values.length === 0 || getData.values[0].length === 0) {
+                console.log('[GoogleAPI] Global Trade Log headers missing, initializing...');
+                const headers = ['date', 'asset_number', 'cj_id', 'ex_user', 'note', 'timestamp'];
+                const updateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${fileId}/values/${encodeURIComponent(sheetTitle)}!A1?valueInputOption=USER_ENTERED`;
+                await fetch(updateUrl, {
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': `Bearer ${this.accessToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ values: [headers] })
+                });
+            }
             return { id: fileId, name: this.TRADE_LOG_FILE_NAME, sheetTitle };
         }
 
@@ -387,16 +406,26 @@ export const googleApi = {
 
     async fetchGlobalTradeLogs() {
         try {
+            console.log('[GoogleAPI] Fetching global trade logs started...');
             const file = await this.getOrCreateGlobalTradeLog();
+            console.log(`[GoogleAPI] Target file: ${file.name}, ID: ${file.id}, Sheet: ${file.sheetTitle}`);
+
             const url = `https://sheets.googleapis.com/v4/spreadsheets/${file.id}/values/${encodeURIComponent(file.sheetTitle)}!A:ZZ`;
             const response = await fetch(url, {
                 headers: { 'Authorization': `Bearer ${this.accessToken}` }
             });
+
             if (response.ok) {
                 const data = await response.json();
-                return this.parseRangeToJson(data.values || [], file.sheetTitle, 'trade');
+                console.log(`[GoogleAPI] Raw rows fetched: ${data.values ? data.values.length : 0}`);
+                const parsed = this.parseRangeToJson(data.values || [], file.sheetTitle || 'Global_Trade', 'trade');
+                console.log(`[GoogleAPI] Parsed objects: ${parsed.length}`);
+                return parsed;
+            } else {
+                const errText = await response.text();
+                console.error(`[GoogleAPI] Fetch failed: ${response.status} - ${errText}`);
+                return [];
             }
-            return [];
         } catch (err) {
             console.error('[GoogleAPI] Failed to fetch global trade logs:', err);
             return [];
