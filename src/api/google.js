@@ -10,6 +10,7 @@ export const googleApi = {
     accessToken: null,
     // Folder ID for backups (User needs to fill this)
     BACKUP_FOLDER_ID: '11hRf6h8ciyd7uXOZeeorR4XaXKKgqSfv',
+    TRADE_LOG_FILE_NAME: 'APP_GLOBAL_TRADE_LOGS',
     CLIENT_ID: '876684580795-l4nj5d5k5uh111j7oc1a1seb7877mtg6.apps.googleusercontent.com',
     SCOPES: [
         'profile',
@@ -152,7 +153,7 @@ export const googleApi = {
                 type = 'users';
             }
             // Inclusive mapping for "Trade"
-            else if (lowerTitle.includes('trade') || lowerTitle.includes('거래') || lowerTitle.includes('변동') || lowerTitle.includes('이력')) {
+            else if (lowerTitle.includes('trade') || lowerTitle.includes('거래') || lowerTitle.includes('변동') || lowerTitle.includes('이력') || lowerTitle.includes('변경')) {
                 type = 'trade';
             }
             // Lenient mapping for primary "Assets" or data sheets
@@ -322,6 +323,199 @@ export const googleApi = {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
         const newName = `${originalName}_BK_${timestamp}`;
         return this.createSessionFile(sheetId, newName);
+    },
+
+    async getOrCreateGlobalTradeLog() {
+        if (!this.accessToken) throw new Error('인증 토큰이 없습니다.');
+
+        // 1. Search for existing file
+        const q = encodeURIComponent(`name='${this.TRADE_LOG_FILE_NAME}' and '${this.BACKUP_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`);
+        const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`;
+        const searchRes = await fetch(searchUrl, {
+            headers: { 'Authorization': `Bearer ${this.accessToken}` }
+        });
+        const searchData = await searchRes.json();
+
+        if (searchData.files && searchData.files.length > 0) {
+            const fileId = searchData.files[0].id;
+            // Get the first sheet name (could be 'Sheet1' or '시트1' depending on locale)
+            const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${fileId}?fields=sheets(properties(title))`;
+            const metaRes = await fetch(metaUrl, { headers: { 'Authorization': `Bearer ${this.accessToken}` } });
+            const metaData = await metaRes.json();
+            const sheetTitle = metaData.sheets[0].properties.title;
+            return { id: fileId, name: this.TRADE_LOG_FILE_NAME, sheetTitle };
+        }
+
+        // 2. Create if not exists
+        console.log('[GoogleAPI] Creating new Global Trade Log file...');
+        const createUrl = `https://sheets.googleapis.com/v4/spreadsheets`;
+        const createRes = await fetch(createUrl, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${this.accessToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                properties: { title: this.TRADE_LOG_FILE_NAME }
+            })
+        });
+        const newSheet = await createRes.json();
+        const sheetId = newSheet.spreadsheetId;
+        const sheetTitle = newSheet.sheets[0].properties.title;
+
+        // Move to backup folder
+        const moveUrl = `https://www.googleapis.com/drive/v3/files/${sheetId}?addParents=${this.BACKUP_FOLDER_ID}&removeParents=root`;
+        await fetch(moveUrl, {
+            method: 'PATCH',
+            headers: { 'Authorization': `Bearer ${this.accessToken}` }
+        });
+
+        // Initialize header
+        const headers = ['date', 'asset_number', 'cj_id', 'ex_user', 'note', 'timestamp'];
+        const updateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(sheetTitle)}!A1?valueInputOption=USER_ENTERED`;
+        await fetch(updateUrl, {
+            method: 'PUT',
+            headers: {
+                'Authorization': `Bearer ${this.accessToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ values: [headers] })
+        });
+
+        return { id: sheetId, name: this.TRADE_LOG_FILE_NAME, sheetTitle };
+    },
+
+    async fetchGlobalTradeLogs() {
+        try {
+            const file = await this.getOrCreateGlobalTradeLog();
+            const url = `https://sheets.googleapis.com/v4/spreadsheets/${file.id}/values/${encodeURIComponent(file.sheetTitle)}!A:ZZ`;
+            const response = await fetch(url, {
+                headers: { 'Authorization': `Bearer ${this.accessToken}` }
+            });
+            if (response.ok) {
+                const data = await response.json();
+                return this.parseRangeToJson(data.values || [], file.sheetTitle, 'trade');
+            }
+            return [];
+        } catch (err) {
+            console.error('[GoogleAPI] Failed to fetch global trade logs:', err);
+            return [];
+        }
+    },
+
+    async appendGlobalTradeLog(log) {
+        if (!this.accessToken) throw new Error('인증 토큰이 없습니다.');
+        const file = await this.getOrCreateGlobalTradeLog();
+
+        // Headers: ['date', 'asset_number', 'cj_id', 'ex_user', 'note', 'timestamp']
+        const row = [
+            log.date || new Date().toISOString().split('T')[0],
+            log.asset_number || '',
+            log.cj_id || '',
+            log.ex_user || '',
+            log.note || '',
+            new Date().toISOString()
+        ];
+
+        const url = `https://sheets.googleapis.com/v4/spreadsheets/${file.id}/values/${encodeURIComponent(file.sheetTitle)}!A1:append?valueInputOption=USER_ENTERED`;
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${this.accessToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ values: [row] })
+        });
+
+        if (!response.ok) {
+            throw new Error(`글로벌 로그 업데이트 실패: ${response.status}`);
+        }
+    },
+
+    async syncMasterTradeToGlobal(masterTradeLogs) {
+        if (!this.accessToken) throw new Error('인증 토큰이 없습니다.');
+        const globalFile = await this.getOrCreateGlobalTradeLog();
+
+        // 1. Fetch current global logs
+        const globalResponse = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${globalFile.id}/values/${encodeURIComponent(globalFile.sheetTitle)}!A:ZZ`, {
+            headers: { 'Authorization': `Bearer ${this.accessToken}` }
+        });
+        const globalData = await globalResponse.json();
+        const globalRows = globalData.values || [[]];
+
+        // 2. Parse existing global logs for deduplication
+        const existingKeys = new Set();
+        if (globalRows.length > 1) {
+            globalRows.slice(1).forEach(row => {
+                const date = row[0] || '';
+                const assetNo = row[1] || '';
+                const cjId = row[2] || '';
+                existingKeys.add(`${date}_${assetNo}_${cjId}`);
+            });
+        }
+        console.log(`[GoogleAPI] Existing global log keys: ${existingKeys.size}`);
+
+        // 3. Filter only NEW logs from master
+        const newRows = [];
+        masterTradeLogs.forEach(log => {
+            const date = this._getVal(log, 'date') || '';
+            const assetNo = this._getVal(log, 'asset_number') || '';
+            const cjId = this._getVal(log, 'cj_id') || '';
+
+            if (!date || !assetNo) return; // Skip invalid entries
+
+            const key = `${date}_${assetNo}_${cjId}`;
+            if (!existingKeys.has(key)) {
+                newRows.push([
+                    date,
+                    assetNo,
+                    cjId,
+                    this._getVal(log, 'ex_user') || '',
+                    this._getVal(log, 'note') || 'Master Sync',
+                    new Date().toISOString()
+                ]);
+            }
+        });
+
+        console.log(`[GoogleAPI] New rows to sync: ${newRows.length}`);
+
+        if (newRows.length === 0) {
+            console.log('[GoogleAPI] No new master trade logs to sync.');
+            return;
+        }
+
+        // 4. Append new logs to global file
+        const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${globalFile.id}/values/${encodeURIComponent(globalFile.sheetTitle)}!A1:append?valueInputOption=USER_ENTERED`;
+        const response = await fetch(appendUrl, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${this.accessToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ values: newRows })
+        });
+
+        if (!response.ok) {
+            const err = await response.text();
+            console.error(`[GoogleAPI] Sync failed: ${err}`);
+            throw new Error('글로벌 로그 동기화 실패');
+        }
+
+        console.log(`[GoogleAPI] Synced ${newRows.length} master logs to global file.`);
+    },
+
+    _getVal(obj, key) {
+        if (!obj) return null;
+        const aliases = {
+            asset_number: ['assetnumber', '자산번호', '관리번호', 'assetno', 'no', '관리no'],
+            cj_id: ['cjid', '사번', 'id', 'cj_id'],
+            date: ['date', '업무일자', '일자', '날짜', 'timestamp'],
+            ex_user: ['ex_user', '이전사용자', 'asset_in_user', 'prev_user'],
+            note: ['note', '메모', '비고', '사항']
+        };
+        const targets = (aliases[key] || [key]).map(t => t.toLowerCase().replace(/[\s_]/g, ''));
+        const foundKey = Object.keys(obj).find(k => targets.includes(k.toLowerCase().replace(/[\s_]/g, '')));
+        return foundKey ? obj[foundKey] : null;
     },
 
     parseRangeToJson(values, sheetName = '', type = '') {

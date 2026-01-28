@@ -20,6 +20,7 @@ export const useAssetStore = defineStore('asset', {
         sessionFiles: [],
         scannedAssetIds: JSON.parse(localStorage.getItem('cached_scanned_ids') || '[]'),
         lastMasterSync: localStorage.getItem('last_master_sync') || null,
+        globalTradeLogs: JSON.parse(localStorage.getItem('cached_global_trade_logs') || '[]'),
         toast: { show: false, message: '', type: 'info' },
         isSyncing: false,
         lastSavedAt: null,
@@ -81,7 +82,21 @@ export const useAssetStore = defineStore('asset', {
                 return foundKey ? obj[foundKey] : null;
             };
 
-            let logs = [...state.tradeLogs];
+            let rawLogs = [...state.globalTradeLogs];
+
+            // Deduplicate logs: key = date + assetNo + cjId
+            const uniqueLogsMap = new Map();
+            rawLogs.forEach(log => {
+                const assetNo = getVal(log, 'asset_number') || 'Unknown';
+                const cjId = getVal(log, 'cj_id') || '';
+                const date = getVal(log, 'date') || '0000-00-00';
+                const key = `${date}_${assetNo}_${cjId}`;
+                if (!uniqueLogsMap.has(key)) {
+                    uniqueLogsMap.set(key, log);
+                }
+            });
+            let logs = Array.from(uniqueLogsMap.values());
+
             if (state.referenceSearchQuery) {
                 const q = state.referenceSearchQuery.toLowerCase();
                 logs = logs.filter(log => Object.values(log).some(v => (v || '').toString().toLowerCase().includes(q)));
@@ -314,6 +329,7 @@ export const useAssetStore = defineStore('asset', {
             this.currentFile = null;
             this.scannedAssetIds = [];
             this.inspectionLogs = [];
+            this.globalTradeLogs = [];
         },
 
         clearScannedList() {
@@ -416,13 +432,25 @@ export const useAssetStore = defineStore('asset', {
                 const masterData = await googleApi.fetchSheetData(latestMaster.id);
                 const rawUsers = masterData.filter(item => item._type === 'users');
                 const rawTrade = masterData.filter(item => item._type === 'trade');
+
+                this.showToast(`마스터 읽기 성공: 사용자 ${rawUsers.length}건, 이력 ${rawTrade.length}건`, 'info');
+
                 if (rawUsers.length > 0) this.users = rawUsers;
-                if (rawTrade.length > 0) this.tradeLogs = rawTrade;
+                // 마스터의 tradeLogs는 전역 로그 파일 에 반영하는 용도로만 사용
+                if (rawTrade.length > 0) {
+                    console.log(`[Store] Syncing ${rawTrade.length} master trade logs to global file...`);
+                    this.showToast('이력 동기화 시작...', 'info');
+                    await googleApi.syncMasterTradeToGlobal(rawTrade);
+                }
 
                 // 로컬 스토리지에 캐시 저장
                 localStorage.setItem('cached_users', JSON.stringify(this.users));
-                localStorage.setItem('cached_trade_logs', JSON.stringify(this.tradeLogs));
+                // tradeLogs는 더 이상 getter에서 직접 쓰지 않으므로 저장 불필요
+                this.tradeLogs = [];
 
+                // 2. 이제 전역 저장 파일만 읽어서 UI에 표시
+                await this.refreshGlobalTradeLogs();
+                this.showToast('데이터 동기화가 완료되었습니다.', 'success');
 
                 // Update sync timestamp
                 const now = new Date().toISOString();
@@ -444,9 +472,49 @@ export const useAssetStore = defineStore('asset', {
                         };
                     });
                 }
-                console.log('Master metadata refreshed successfully');
+                console.log('Master and Global metadata refreshed successfully');
             } catch (err) {
                 console.warn('Failed to refresh master metadata:', err);
+            }
+        },
+
+        async refreshGlobalTradeLogs() {
+            try {
+                const logs = await googleApi.fetchGlobalTradeLogs();
+                if (logs && logs.length > 0) {
+                    this.globalTradeLogs = logs;
+                    localStorage.setItem('cached_global_trade_logs', JSON.stringify(this.globalTradeLogs));
+                }
+            } catch (err) {
+                console.warn('[Store] Failed to fetch global trade logs:', err);
+            }
+        },
+
+        async logAssetChange(assetNumber, newCjId, exUserCjId, note = '') {
+            try {
+                const log = {
+                    date: new Date().toISOString().split('T')[0],
+                    asset_number: assetNumber,
+                    cj_id: newCjId,
+                    ex_user: exUserCjId,
+                    note: note
+                };
+
+                // 1. 서버에 즉시 전송 시도
+                await googleApi.appendGlobalTradeLog(log);
+
+                // 2. 성공하면 로컬 상태에도 추가 (새로고침 전에도 보이게)
+                this.globalTradeLogs.push({
+                    ...log,
+                    _type: 'trade',
+                    _sheetName: 'Global_Trade'
+                });
+                localStorage.setItem('cached_global_trade_logs', JSON.stringify(this.globalTradeLogs));
+
+                console.log(`[Store] Global trade log appended for ${assetNumber}`);
+            } catch (err) {
+                console.error('[Store] Failed to log asset change globally:', err);
+                this.showToast('변경 이력 기록 실패', 'error');
             }
         },
 
