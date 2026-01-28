@@ -388,7 +388,9 @@ export const useAssetStore = defineStore('asset', {
             this.masterFiles = await googleApi.listMasterSheets();
         },
         async refreshSessions() {
-            this.sessionFiles = await googleApi.listSessionSheets();
+            const files = await googleApi.listSessionSheets();
+            // Filter out the global trade log file from the selection list
+            this.sessionFiles = files.filter(f => f.name !== googleApi.TRADE_LOG_FILE_NAME);
         },
         async loadProject(file) {
             this.error = null;
