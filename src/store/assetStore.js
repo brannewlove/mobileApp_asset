@@ -367,10 +367,11 @@ export const useAssetStore = defineStore('asset', {
                 if (!token) throw new Error('토큰을 입력해주세요.');
                 googleApi.setToken(token);
 
-                // Fetch both lists in parallel
+                // Fetch both lists and global logs in parallel
                 await Promise.all([
                     this.refreshMasters(),
-                    this.refreshSessions()
+                    this.refreshSessions(),
+                    this.refreshGlobalTradeLogs()
                 ]);
                 this.isAuthenticated = true;
 
@@ -415,6 +416,9 @@ export const useAssetStore = defineStore('asset', {
 
                 // 3. 마스터 데이터(인사정보) 동기화 체크 (배경 작업)
                 this.checkAndSyncMaster();
+
+                // 4. 전역 이력 데이터 즉시 로드 시도
+                this.refreshGlobalTradeLogs();
 
             } catch (err) {
                 this.handleAuthError(err);
