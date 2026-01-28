@@ -2025,7 +2025,7 @@ h1 {
 /* Toast Animation & Styles */
 .toast-overlay {
   position: fixed;
-  bottom: 100px;
+  top: 80px;
   left: 0;
   right: 0;
   display: flex;
