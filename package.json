@@ -11,6 +11,7 @@
   "dependencies": {
     "@capacitor/android": "^8.0.1",
     "@capacitor/core": "^8.0.1",
+    "@capacitor/network": "^8.0.0",
     "@capgo/capacitor-social-login": "^8.2.16",
     "lucide-vue-next": "^0.563.0",
     "pinia": "^3.0.4",

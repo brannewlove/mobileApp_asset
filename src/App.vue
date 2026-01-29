@@ -27,8 +27,13 @@ import {
   AlertCircle,
   ClipboardList,
   Crosshair,
-  Settings
+  Settings,
+  Wifi,
+  WifiOff,
+  CloudOff,
+  CloudUpload
 } from 'lucide-vue-next'
+import { Network } from '@capacitor/network'
 import AssetCard from './components/AssetCard.vue'
 
 const store = useAssetStore()
@@ -143,6 +148,18 @@ onMounted(async () => {
       store.checkAndSyncMaster()
     }
   }
+
+  // Network Status Monitoring
+  const status = await Network.getStatus()
+  store.isOnline = status.connected
+  
+  Network.addListener('networkStatusChange', status => {
+    store.isOnline = status.connected
+    if (status.connected && store.hasPendingSync) {
+      console.log('[Network] Back online, triggering auto-sync...')
+      store.triggerDebouncedSave()
+    }
+  })
 })
 
 // 로그인이 완료되면 자동으로 로그인 화면 닫기
@@ -345,10 +362,18 @@ const handleTrackAsset = (assetNumber) => {
   <header class="glass header">
     <div class="header-top">
       <h1>Asset Manager</h1>
-      <div class="sync-status" :class="{ syncing: store.isSyncing }">
-        <template v-if="store.isSyncing">
+      <div class="sync-status" :class="{ syncing: store.isSyncing, offline: !store.isOnline }">
+        <template v-if="!store.isOnline">
+          <WifiOff size="14" class="status-icon" />
+          <span>오프라인 환경</span>
+        </template>
+        <template v-else-if="store.isSyncing">
           <RefreshCw size="14" class="spin-icon" />
           <span>저장 중...</span>
+        </template>
+        <template v-else-if="store.hasPendingSync">
+          <CloudUpload size="14" class="blink-icon" />
+          <span>동기화 대기 중</span>
         </template>
         <template v-else-if="store.lastSavedAt">
           <CheckCircle size="14" />
@@ -692,6 +717,17 @@ const handleTrackAsset = (assetNumber) => {
           </div>
         </button>
         
+        <button class="glass action-card sync-now" @click="store.saveDataInBackground" :disabled="store.loading || !store.isOnline || !store.hasPendingSync">
+          <div class="action-icon">
+            <CloudUpload size="20" />
+          </div>
+          <div class="action-info">
+            <span class="action-title">즉시 동기화</span>
+            <span class="action-desc">대기 중인 변경사항을 지금 업로드합니다.</span>
+          </div>
+          <div v-if="store.hasPendingSync" class="pending-badge">!</div>
+        </button>
+
         <button class="glass action-card logout" @click="handleLogout">
           <div class="action-icon">
             <LogOut size="20" />
@@ -759,15 +795,15 @@ const handleTrackAsset = (assetNumber) => {
 <style scoped>
 .header {
   margin: 0;
-  padding: calc(16px + env(safe-area-inset-top)) 16px 16px 16px;
-  border-radius: 0 0 24px 24px;
+  padding: calc(10px + env(safe-area-inset-top)) 16px 10px 16px;
+  border-radius: 0 0 20px 20px;
 }
 
 .header-top {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 12px;
+  margin-bottom: 8px;
 }
 
 .logout-btn {
@@ -818,14 +854,18 @@ const handleTrackAsset = (assetNumber) => {
 
 h1 {
   margin: 0;
-  font-size: 1.5rem;
-  letter-spacing: -0.5px;
+  font-size: 1.1rem;
+  letter-spacing: -0.3px;
+  font-weight: 800;
+  background: linear-gradient(135deg, #fff 0%, #a78bfa 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
 .progress-container {
-  height: 24px;
+  height: 18px;
   background: rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
+  border-radius: 10px;
   position: relative;
   overflow: hidden;
 }
@@ -841,8 +881,8 @@ h1 {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  font-size: 0.75rem;
-  font-weight: 600;
+  font-size: 0.65rem;
+  font-weight: 700;
 }
 
 .sync-status {
@@ -866,7 +906,7 @@ h1 {
 
 .content {
   flex: 1;
-  padding: 0 16px calc(110px + env(safe-area-inset-bottom)) 16px;
+  padding: 12px 16px calc(110px + env(safe-area-inset-bottom)) 16px;
   overflow-y: auto;
 }
 
@@ -1624,6 +1664,52 @@ h1 {
   padding: 4px 8px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 6px;
+}
+
+/* Sync Status & Offline Styles */
+.sync-status.offline {
+  background: rgba(239, 68, 68, 0.1);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.sync-status.offline span {
+  color: #f87171;
+}
+
+.blink-icon {
+  animation: blink 2s infinite;
+  color: var(--warning);
+}
+
+@keyframes blink {
+  0% { opacity: 1; }
+  50% { opacity: 0.4; }
+  100% { opacity: 1; }
+}
+
+.pending-badge {
+  background: var(--warning);
+  color: white;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 800;
+  margin-left: auto;
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.4);
+}
+
+.sync-now:disabled {
+  opacity: 0.3;
+}
+
+.sync-now .action-icon {
+  background: rgba(217, 119, 6, 0.1);
+  color: #d97706;
 }
 
 /* History Actions Grid */

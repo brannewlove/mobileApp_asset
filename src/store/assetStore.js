@@ -23,7 +23,9 @@ export const useAssetStore = defineStore('asset', {
         isSyncing: false,
         lastSavedAt: null,
         saveTimeout: null,
-        referenceLimit: 20
+        referenceLimit: 20,
+        isOnline: true,
+        hasPendingSync: JSON.parse(localStorage.getItem('has_pending_sync') || 'false')
     }),
 
     getters: {
@@ -273,6 +275,8 @@ export const useAssetStore = defineStore('asset', {
                     inspection_time: now,
                     _sort_time: Date.now() // 정렬용 타임스탬프 추가 (백업용)
                 };
+                this.hasPendingSync = true;
+                localStorage.setItem('has_pending_sync', 'true');
 
                 // ID 목록 처리: 이미 있다면 제거하고 맨 뒤에 추가 (최신화)
                 this.scannedAssetIds = this.scannedAssetIds.filter(id => id !== assetNumber);
@@ -293,6 +297,8 @@ export const useAssetStore = defineStore('asset', {
 
 
 
+                this.hasPendingSync = true;
+                localStorage.setItem('has_pending_sync', 'true');
                 this._persistSession();
                 this.triggerDebouncedSave();
                 this.showToast('실사 취소가 완료되었습니다.', 'success');
@@ -303,6 +309,8 @@ export const useAssetStore = defineStore('asset', {
             const index = this.assets.findIndex(a => a.assetNumber === assetNumber);
             if (index !== -1) {
                 this.assets[index].note = note;
+                this.hasPendingSync = true;
+                localStorage.setItem('has_pending_sync', 'true');
                 this._persistSession();
                 this.triggerDebouncedSave();
             }
@@ -560,15 +568,24 @@ export const useAssetStore = defineStore('asset', {
         async saveDataInBackground() {
             if (!this.currentFile || this.isSyncing) return;
 
+            if (!this.isOnline) {
+                console.log('[Sync] Offline: Change queued for later sync');
+                return;
+            }
+
             this.isSyncing = true;
             try {
                 const sessionAssets = this.assets.filter(a => a._type === 'assets');
                 await googleApi.updateSheet(this.currentFile.id, sessionAssets);
                 this.lastSavedAt = new Date().toLocaleTimeString();
+                this.hasPendingSync = false;
+                localStorage.setItem('has_pending_sync', 'false');
                 console.log('[Sync] Background save completed at', this.lastSavedAt);
             } catch (err) {
                 console.error('[Sync] Background save failed:', err);
-                // 에러 발생 시 사용자에게 알림이 필요할 수 있습니다.
+                if (err.message.includes('fetch') || err.message.includes('network')) {
+                    this.isOnline = false;
+                }
             } finally {
                 this.isSyncing = false;
                 this.saveTimeout = null;
