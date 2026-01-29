@@ -7,12 +7,10 @@ export const useAssetStore = defineStore('asset', {
         users: JSON.parse(localStorage.getItem('cached_users') || '[]'),
         tradeLogs: JSON.parse(localStorage.getItem('cached_trade_logs') || '[]'),
         currentFile: JSON.parse(localStorage.getItem('current_session_file') || 'null'),
-        inspectionLogs: JSON.parse(localStorage.getItem('cached_inspection_logs') || '[]'),
         loading: false,
         error: null,
         searchQuery: '',
         inspectionSearchQuery: '',
-        logSearchQuery: '',
         referenceSearchQuery: '',
         selectedDepartment: '전체',
         isAuthenticated: !!localStorage.getItem('google_access_token'),
@@ -57,15 +55,7 @@ export const useAssetStore = defineStore('asset', {
             return result;
         },
 
-        filteredLogs: (state) => {
-            const logs = [...state.inspectionLogs].reverse();
-            if (!state.logSearchQuery) return logs;
-            const q = state.logSearchQuery.toLowerCase();
-            return logs.filter(log =>
-                [log.assetNumber, log.from?.user, log.to?.user]
-                    .some(v => (v || '').toLowerCase().includes(q))
-            );
-        },
+
 
         filteredTradeLogs: (state) => {
             const getVal = (obj, key) => {
@@ -265,7 +255,6 @@ export const useAssetStore = defineStore('asset', {
         _persistSession() {
             localStorage.setItem('cached_assets', JSON.stringify(this.assets));
             localStorage.setItem('cached_scanned_ids', JSON.stringify(this.scannedAssetIds));
-            localStorage.setItem('cached_inspection_logs', JSON.stringify(this.inspectionLogs));
             if (this.currentFile) {
                 localStorage.setItem('current_session_file', JSON.stringify(this.currentFile));
             }
@@ -302,8 +291,7 @@ export const useAssetStore = defineStore('asset', {
                 // Remove from scanned IDs
                 this.scannedAssetIds = this.scannedAssetIds.filter(id => id !== assetNumber);
 
-                // Remove related movement logs for this asset in current session (optional but cleaner)
-                this.inspectionLogs = this.inspectionLogs.filter(log => log.assetNumber !== assetNumber);
+
 
                 this._persistSession();
                 this.triggerDebouncedSave();
@@ -328,7 +316,6 @@ export const useAssetStore = defineStore('asset', {
             this.isAuthenticated = false;
             this.currentFile = null;
             this.scannedAssetIds = [];
-            this.inspectionLogs = [];
             this.globalTradeLogs = [];
         },
 

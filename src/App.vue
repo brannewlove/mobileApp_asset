@@ -26,7 +26,8 @@ import {
   Info,
   AlertCircle,
   ClipboardList,
-  Crosshair
+  Crosshair,
+  Settings
 } from 'lucide-vue-next'
 import AssetCard from './components/AssetCard.vue'
 
@@ -655,7 +656,7 @@ const handleTrackAsset = (assetNumber) => {
       </div>
     </div>
 
-    <!-- Session History Tab -->
+    <!-- System Settings Tab -->
     <div v-if="!showLogin && !showProjectSelector && activeTab === 'history'" class="tab-content">
       <div class="glass session-info-bar" @click="handleSwitchSession">
         <div class="session-meta">
@@ -667,17 +668,7 @@ const handleTrackAsset = (assetNumber) => {
         <button class="switch-session-btn">회차 전환</button>
       </div>
 
-      <!-- History Search - Moved to top for visibility -->
-      <div class="glass search-section log-search">
-        <Search class="icon" />
-        <input 
-          v-model="store.logSearchQuery" 
-          placeholder="자산번호 또는 이름으로 히스토리 검색" 
-        />
-        <button v-if="store.logSearchQuery" @click="store.logSearchQuery = ''" class="clear-filter-btn">
-          <X size="18" />
-        </button>
-      </div>
+
 
       <!-- Settings / System Actions Section -->
       <div class="history-actions-grid">
@@ -712,40 +703,7 @@ const handleTrackAsset = (assetNumber) => {
         </button>
       </div>
 
-      <div v-if="store.filteredLogs.length === 0" class="empty-state">
-        <ClipboardList size="48" class="icon dimmed" />
-        <p>{{ store.logSearchQuery ? '검색 결과가 없습니다.' : '현재 세션에서 발생한 변동 내역이 없습니다.' }}</p>
-        <span class="sub">사용자나 부서가 변경된 자산이 여기에 표시됩니다.</span>
-      </div>
 
-      <div v-else class="log-list">
-        <div v-for="(log, idx) in store.filteredLogs" :key="idx" class="glass log-card">
-          <div class="log-header">
-            <div class="log-asset-group">
-              <span class="log-asset">{{ log.assetNumber }}</span>
-              <span v-if="log.reason === 'Master Sync'" class="log-reason-tag">마스터 동기화</span>
-            </div>
-            <div class="log-time">{{ new Date(log.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) }}</div>
-          </div>
-          <div class="log-body">
-            <template v-if="log.type === 'movement'">
-              <div class="movement">
-                <div class="move-item from">
-                  <span class="move-label">이전 소속</span>
-                  <span class="move-val">{{ log.from.user || '없음' }} ({{ log.from.dept || '없음' }})</span>
-                </div>
-                <div class="move-arrow">
-                  <ChevronRight size="18" />
-                </div>
-                <div class="move-item to">
-                  <span class="move-label">현재 소속</span>
-                  <span class="move-val">{{ log.to.user }} ({{ log.to.dept }})</span>
-                </div>
-              </div>
-            </template>
-          </div>
-        </div>
-      </div>
     </div>
   </main>
 
@@ -764,8 +722,8 @@ const handleTrackAsset = (assetNumber) => {
         <span>추적</span>
       </button>
       <button @click="activeTab = 'history'" :class="{ active: activeTab === 'history' }">
-        <ClipboardList />
-        <span>히스토리</span>
+        <Settings />
+        <span>설정</span>
       </button>
     </nav>
 
