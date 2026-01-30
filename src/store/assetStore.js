@@ -427,14 +427,20 @@ export const useAssetStore = defineStore('asset', {
 
         async refreshMasterMetadata() {
             try {
+                // 0. 현재 회차의 변경사항을 먼저 저장
+                if (this.currentFile && this.hasPendingSync) {
+                    await this.saveDataInBackground();
+                }
+
                 const latestMaster = await googleApi.getLatestSheet();
                 if (!latestMaster) return;
 
                 const masterData = await googleApi.fetchSheetData(latestMaster.id);
                 const rawUsers = masterData.filter(item => item._type === 'users');
                 const rawTrade = masterData.filter(item => item._type === 'trade');
+                const rawAssets = masterData.filter(item => item._type === 'assets');
 
-                this.showToast(`마스터 읽기 성공: 사용자 ${rawUsers.length}건, 이력 ${rawTrade.length}건`, 'info');
+                this.showToast(`마스터 읽기 성공: 사용자 ${rawUsers.length}건, 자산 ${rawAssets.length}건, 이력 ${rawTrade.length}건`, 'info');
 
                 if (rawUsers.length > 0) this.users = rawUsers;
                 // 마스터의 tradeLogs는 전역 로그 파일 에 반영하는 용도로만 사용
@@ -446,36 +452,80 @@ export const useAssetStore = defineStore('asset', {
 
                 // 로컬 스토리지에 캐시 저장
                 localStorage.setItem('cached_users', JSON.stringify(this.users));
-                // tradeLogs는 더 이상 getter에서 직접 쓰지 않으므로 저장 불필요
                 this.tradeLogs = [];
 
-                // 2. 이제 전역 저장 파일만 읽어서 UI에 표시
+                // 2. 전역 저장 파일만 읽어서 UI에 표시
                 await this.refreshGlobalTradeLogs();
-                this.showToast('데이터 동기화가 완료되었습니다.', 'success');
+
+                // 3. 현재 회차(assets)에 마스터의 최신 정보 반영 및 신규 자산 추가
+                if (this.assets.length > 0 && rawAssets.length > 0) {
+                    const currentAssetsMap = new Map();
+                    this.assets.forEach(a => currentAssetsMap.set(a.assetNumber, a));
+
+                    rawAssets.forEach(masterAsset => {
+                        const assetNo = this._getVal(masterAsset, 'asset_number');
+                        const state = this._getVal(masterAsset, 'state');
+                        if (!assetNo || (state && state.toLowerCase() === 'termination')) return;
+
+                        const inUser = this._getVal(masterAsset, 'in_user');
+                        const user = this.users.find(u => {
+                            const cid = this._getVal(u, 'cj_id');
+                            return cid && inUser && cid.toString().trim() === inUser.toString().trim();
+                        });
+
+                        if (currentAssetsMap.has(assetNo)) {
+                            // 기존 자산 업데이트 (실사 상태/메모는 유지하고 메타데이터만 갱신)
+                            const existing = currentAssetsMap.get(assetNo);
+                            currentAssetsMap.set(assetNo, {
+                                ...existing,
+                                category: this._getVal(masterAsset, 'category') || existing.category,
+                                modelName: this._getVal(masterAsset, 'model_name') || this._getVal(masterAsset, 'model') || existing.modelName,
+                                serial_number: this._getVal(masterAsset, 'serial_number') || existing.serial_number,
+                                in_user: inUser,
+                                userName: user ? this._getVal(user, 'user_name') : (this._getVal(masterAsset, 'user_name') || inUser),
+                                department: user ? this._getVal(user, 'department') : (this._getVal(masterAsset, 'department') || ''),
+                                originalData: { ...existing.originalData, ...masterAsset }
+                            });
+                        } else {
+                            // 신규 자산 추가
+                            this.assets.push({
+                                ...masterAsset,
+                                category: this._getVal(masterAsset, 'category') || '',
+                                modelName: this._getVal(masterAsset, 'model_name') || this._getVal(masterAsset, 'model') || '',
+                                serial_number: this._getVal(masterAsset, 'serial_number') || '',
+                                asset_number: assetNo,
+                                assetNumber: assetNo,
+                                in_user: inUser,
+                                userName: user ? this._getVal(user, 'user_name') : (this._getVal(masterAsset, 'user_name') || inUser),
+                                department: user ? this._getVal(user, 'department') : (this._getVal(masterAsset, 'department') || ''),
+                                status: 'pending',
+                                inspection_time: '',
+                                note: '',
+                                originalData: { ...masterAsset }
+                            });
+                        }
+                    });
+
+                    // 업데이트된 맵 정보를 다시 배열로 변환
+                    this.assets = Array.from(currentAssetsMap.values());
+
+                    // 변경된 내용을 회차 파일에도 즉시 저장
+                    this.hasPendingSync = true;
+                    await this.saveDataInBackground();
+                }
+
+                this.showToast('전체 데이터 동기화가 완료되었습니다.', 'success');
 
                 // Update sync timestamp
                 const now = new Date().toISOString();
                 this.lastMasterSync = now;
                 localStorage.setItem('last_master_sync', now);
 
-                // Re-apply joins to existing assets
-                if (this.assets.length > 0) {
-                    this.assets = this.assets.map(asset => {
-                        const inUser = this._getVal(asset, 'in_user');
-                        const user = this.users.find(u => {
-                            const cid = this._getVal(u, 'cj_id');
-                            return cid && inUser && cid.toString().trim() === inUser.toString().trim();
-                        });
-                        return {
-                            ...asset,
-                            userName: user ? this._getVal(user, 'user_name') : (this._getVal(asset, 'user_name') || inUser),
-                            department: user ? this._getVal(user, 'department') : (this._getVal(asset, 'department') || ''),
-                        };
-                    });
-                }
+                this._persistSession();
                 console.log('Master and Global metadata refreshed successfully');
             } catch (err) {
                 console.warn('Failed to refresh master metadata:', err);
+                this.showToast('동기화 중 오류 발생: ' + err.message, 'error');
             }
         },
 
