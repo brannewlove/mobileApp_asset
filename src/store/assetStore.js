@@ -468,7 +468,16 @@ export const useAssetStore = defineStore('asset', {
                     rawAssets.forEach(masterAsset => {
                         const assetNo = this._getVal(masterAsset, 'asset_number');
                         const state = this._getVal(masterAsset, 'state');
-                        if (!assetNo || (state && state.toLowerCase() === 'termination')) return;
+                        if (!assetNo) return;
+
+                        // 마스터에서 폐기(termination) 상태인 경우 현재 목록에서 제거
+                        if (state && state.toLowerCase() === 'termination') {
+                            if (currentAssetsMap.has(assetNo)) {
+                                console.log(`[Sync] Removing terminated asset from session: ${assetNo}`);
+                                currentAssetsMap.delete(assetNo);
+                            }
+                            return;
+                        }
 
                         const inUser = this._getVal(masterAsset, 'in_user');
                         const user = this.users.find(u => {
