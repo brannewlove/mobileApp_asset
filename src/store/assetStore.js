@@ -341,7 +341,7 @@ export const useAssetStore = defineStore('asset', {
 
                 if (token) {
                     await this.initializeData(token);
-                    this.isAuthenticated = true; // 여기에 명시적으로 추가
+                    this.isAuthenticated = true;
                     console.log('[Store] Login success, UI should update.');
                 } else {
                     throw new Error('토큰을 발급받지 못했습니다.');

@@ -195,9 +195,14 @@ const handleLogin = async () => {
   }
 }
 
-const handleRetryList = async () => {
-  if (accessTokenInput.value) {
-    await store.initializeData(accessTokenInput.value)
+const handleGoogleLogin = async () => {
+  await store.loginWithGoogle()
+  if (store.isAuthenticated) {
+    showLogin.value = false
+    showProjectSelector.value = true
+    if (!selectedMaster.value && store.masterFiles.length > 0) {
+      selectedMaster.value = store.masterFiles[0]
+    }
   }
 }
 
@@ -395,7 +400,7 @@ const handleTrackAsset = (assetNumber) => {
         <p class="desc">구글 API를 사용하기 위해 아래 버튼으로 로그인하거나 Access Token을 직접 입력해주세요.</p>
         
         <!-- Native Google Login Button -->
-        <button @click="store.loginWithGoogle" :disabled="store.loading" class="primary-btn google-login-btn">
+        <button @click="handleGoogleLogin" :disabled="store.loading" class="primary-btn google-login-btn">
           <Database size="18" class="btn-icon" />
           {{ store.loading ? '로그인 중...' : '구글 계정으로 로그인' }}
         </button>
