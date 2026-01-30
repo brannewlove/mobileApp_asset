@@ -458,9 +458,12 @@ export const useAssetStore = defineStore('asset', {
                 await this.refreshGlobalTradeLogs();
 
                 // 3. 현재 회차(assets)에 마스터의 최신 정보 반영 및 신규 자산 추가
-                if (this.assets.length > 0 && rawAssets.length > 0) {
+                if (rawAssets.length > 0) {
                     const currentAssetsMap = new Map();
-                    this.assets.forEach(a => currentAssetsMap.set(a.assetNumber, a));
+                    this.assets.forEach(a => {
+                        const assetNo = a.assetNumber || this._getVal(a, 'asset_number');
+                        if (assetNo) currentAssetsMap.set(assetNo, a);
+                    });
 
                     rawAssets.forEach(masterAsset => {
                         const assetNo = this._getVal(masterAsset, 'asset_number');
@@ -473,31 +476,29 @@ export const useAssetStore = defineStore('asset', {
                             return cid && inUser && cid.toString().trim() === inUser.toString().trim();
                         });
 
+                        const assetUpdates = {
+                            category: this._getVal(masterAsset, 'category') || '',
+                            modelName: this._getVal(masterAsset, 'model_name') || this._getVal(masterAsset, 'model') || '',
+                            serial_number: this._getVal(masterAsset, 'serial_number') || '',
+                            in_user: inUser,
+                            userName: user ? this._getVal(user, 'user_name') : (this._getVal(masterAsset, 'user_name') || inUser),
+                            department: user ? this._getVal(user, 'department') : (this._getVal(masterAsset, 'department') || ''),
+                        };
+
                         if (currentAssetsMap.has(assetNo)) {
                             // 기존 자산 업데이트 (실사 상태/메모는 유지하고 메타데이터만 갱신)
                             const existing = currentAssetsMap.get(assetNo);
                             currentAssetsMap.set(assetNo, {
                                 ...existing,
-                                category: this._getVal(masterAsset, 'category') || existing.category,
-                                modelName: this._getVal(masterAsset, 'model_name') || this._getVal(masterAsset, 'model') || existing.modelName,
-                                serial_number: this._getVal(masterAsset, 'serial_number') || existing.serial_number,
-                                in_user: inUser,
-                                userName: user ? this._getVal(user, 'user_name') : (this._getVal(masterAsset, 'user_name') || inUser),
-                                department: user ? this._getVal(user, 'department') : (this._getVal(masterAsset, 'department') || ''),
+                                ...assetUpdates,
                                 originalData: { ...existing.originalData, ...masterAsset }
                             });
                         } else {
                             // 신규 자산 추가
-                            this.assets.push({
+                            currentAssetsMap.set(assetNo, {
                                 ...masterAsset,
-                                category: this._getVal(masterAsset, 'category') || '',
-                                modelName: this._getVal(masterAsset, 'model_name') || this._getVal(masterAsset, 'model') || '',
-                                serial_number: this._getVal(masterAsset, 'serial_number') || '',
-                                asset_number: assetNo,
+                                ...assetUpdates,
                                 assetNumber: assetNo,
-                                in_user: inUser,
-                                userName: user ? this._getVal(user, 'user_name') : (this._getVal(masterAsset, 'user_name') || inUser),
-                                department: user ? this._getVal(user, 'department') : (this._getVal(masterAsset, 'department') || ''),
                                 status: 'pending',
                                 inspection_time: '',
                                 note: '',
