@@ -1,0 +1,39 @@
+﻿
+[Incubating] Problems report is available at: file:///C:/Users/LeeJH/.gemini/antigravity/scratch/asset-manager-android/android/build/reports/problems/problems-report.html
+./gradlew : 
+위치 줄:1 문자:13
++ cd android; ./gradlew help
+ > build_err.txt 2>&1
++             ~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          
+    : NotSpecified: (:Stri  
+  ng) [], RemoteException
+    + FullyQualifiedErrorId 
+    : NativeCommandError
+ 
+FAILURE: Build failed with a
+n exception.
+
+* What went wrong:
+Configuring project ':capaci
+tor-network' without an exis
+ting directory is not allowe
+d. The configured projectDir
+ectory 'C:\Users\LeeJH\.gemi
+ni\antigravity\scratch\asset
+-manager-android\node_module
+s\@capacitor\network\android
+' does not exist, can't be w
+ritten to or is not a direct
+ory.
+
+* Try:
+> Make sure the project dire
+ctory exists and is writable
+.
+> Run with --scan to generat
+e a Build Scan (Powered by D
+evelocity).
+
+BUILD FAILED in 1s
