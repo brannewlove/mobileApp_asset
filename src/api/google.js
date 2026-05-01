@@ -10,7 +10,7 @@ export const googleApi = {
     accessToken: null,
     // Folder ID for backups (User needs to fill this)
     BACKUP_FOLDER_ID: '11hRf6h8ciyd7uXOZeeorR4XaXKKgqSfv',
-    TRADE_LOG_FILE_NAME: 'APP_GLOBAL_TRADE_LOGS',
+    TRADE_LOG_FILE_NAME: 'APP_GLOBAL_TRADE_LOGS_V2',
     CLIENT_ID: '876684580795-l4nj5d5k5uh111j7oc1a1seb7877mtg6.apps.googleusercontent.com',
     SCOPES: [
         'profile',
@@ -21,9 +21,86 @@ export const googleApi = {
     ],
 
     async initialize() {
+        if (this._initialized) return;
         await SocialLogin.initialize({
             google: { webClientId: this.CLIENT_ID },
         });
+        this._initialized = true;
+    },
+
+    /**
+     * 공통 API 요청 핸들러: 인증 토큰을 자동으로 삽입하고, 
+     * 401(인증 만료) 발생 시 1회에 한해 자동으로 토큰을 갱신하고 재시도합니다.
+     */
+    /**
+     * Google tokeninfo API를 통해 현재 토큰이 아직 유효한지 확인합니다.
+     * 계정 선택창을 띄우지 않고 순수 HTTP 요청만 합니다.
+     * @returns {number} 남은 유효시간(초). 만료됐으면 0.
+     */
+    async _validateToken() {
+        if (!this.accessToken) return 0;
+        try {
+            const res = await fetch(
+                `https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=${encodeURIComponent(this.accessToken)}`
+            );
+            if (!res.ok) return 0;
+            const data = await res.json();
+            const expiresIn = parseInt(data.expires_in, 10);
+            return isNaN(expiresIn) ? 0 : expiresIn;
+        } catch {
+            return 0;
+        }
+    },
+
+    async _request(url, options = {}, retry = true) {
+        if (!this.accessToken) {
+            // 로컬 스토리지에서 토큰 복구 시도
+            const savedToken = localStorage.getItem('google_access_token');
+            if (savedToken) {
+                this.accessToken = savedToken;
+            } else {
+                throw new Error('[AUTH_REQUIRED] 인증이 필요합니다.');
+            }
+        }
+
+        const headers = {
+            ...options.headers,
+            'Authorization': `Bearer ${this.accessToken}`
+        };
+
+        try {
+            const response = await fetch(url, { ...options, headers });
+
+            if (response.status === 401 && retry) {
+                console.warn('[GoogleAPI] 401 Unauthorized detected. Attempting silent recovery...');
+                try {
+                    // 1단계: tokeninfo API로 토큰이 진짜 만료됐는지 확인
+                    //        (서버 측 일시적 거부일 수도 있으므로)
+                    const remaining = await this._validateToken();
+                    if (remaining > 30) {
+                        // 토큰은 아직 유효한데 401이 온 경우 → 단순 재시도
+                        console.log(`[GoogleAPI] Token still valid (${remaining}s). Retrying request...`);
+                        return await this._request(url, options, false);
+                    }
+
+                    // 2단계: 토큰이 진짜 만료 → 재인증 (계정 선택창 불가피)
+                    console.log('[GoogleAPI] Token truly expired. Re-authenticating...');
+                    await this.refreshAccessToken();
+                    return await this._request(url, options, false);
+                } catch (refreshError) {
+                    console.error('[GoogleAPI] Recovery failed:', refreshError);
+                    throw new Error('[AUTH_EXPIRED] 인증 세션이 만료되었습니다.');
+                }
+            }
+
+            return response;
+        } catch (fetchError) {
+            if (fetchError.message.includes('[AUTH_EXPIRED]') || fetchError.message.includes('[AUTH_REQUIRED]')) {
+                throw fetchError;
+            }
+            console.error('[GoogleAPI] Network or Fetch error:', fetchError);
+            throw new Error(`네트워크 오류가 발생했습니다: ${fetchError.message}`);
+        }
     },
 
     async signInWithGoogle() {
@@ -44,6 +121,8 @@ export const googleApi = {
                     : response.result.accessToken.token;
             }
             this.accessToken = token;
+            localStorage.setItem('google_access_token', token);
+            localStorage.setItem('google_token_time', Date.now().toString());
 
             // 기존 코드 호환성을 위해 authentication 객체를 포함하여 반환합니다.
             return {
@@ -57,11 +136,59 @@ export const googleApi = {
     },
 
     /**
-     * 무음 토큰 갱신: 사용자 개입 없이 배경에서 토큰만 새로 가져옵니다.
+     * 토큰 갱신 (3단계 전략):
+     *   1단계: tokeninfo API로 아직 유효하면 → 그대로 사용 (팝업 없음)
+     *   2단계: SocialLogin.refresh()로 무음 갱신 시도 (팝업 없음)
+     *   3단계: SocialLogin.login() 최후 수단 (계정선택창 불가피)
      */
     async refreshAccessToken() {
+        // ── 1단계: 현재 토큰이 아직 유효한지 확인 (계정선택 없이) ──
+        const remaining = await this._validateToken();
+        if (remaining > 60) {
+            console.log(`[GoogleAPI] Token still valid (${remaining}s). Skipping re-auth.`);
+            localStorage.setItem('google_token_time', Date.now().toString());
+            return this.accessToken;
+        }
+
+        // ── 2단계: SocialLogin.refresh()로 무음 갱신 시도 ──
+        // Android 네이티브에서는 Google Play Services의 silentSignIn을 사용하여
+        // 계정선택창 없이 백그라운드에서 새 토큰을 받아올 수 있습니다.
         try {
-            console.log('[GoogleAPI] Attempting silent token refresh...');
+            await this.initialize();
+            console.log('[GoogleAPI] Attempting silent refresh via SocialLogin.refresh()...');
+            await SocialLogin.refresh({
+                provider: 'google',
+                options: { scopes: this.SCOPES }
+            });
+
+            // refresh 후 login으로 갱신된 토큰을 가져옴
+            // (refresh는 void를 반환하므로 login으로 토큰 재취득)
+            const response = await SocialLogin.login({
+                provider: 'google',
+                options: { scopes: this.SCOPES }
+            });
+
+            let token = '';
+            if (response.result && response.result.accessToken) {
+                token = typeof response.result.accessToken === 'string'
+                    ? response.result.accessToken
+                    : response.result.accessToken.token;
+            }
+            if (token) {
+                this.accessToken = token;
+                localStorage.setItem('google_access_token', token);
+                localStorage.setItem('google_token_time', Date.now().toString());
+                console.log('[GoogleAPI] Silent refresh succeeded (no account picker).');
+                return this.accessToken;
+            }
+        } catch (silentError) {
+            console.warn('[GoogleAPI] Silent refresh not available:', silentError.message || silentError);
+            // 2단계 실패 → 3단계로 진행
+        }
+
+        // ── 3단계: 최후 수단 — SocialLogin.login() (계정선택창 뜰 수 있음) ──
+        try {
+            console.log('[GoogleAPI] Falling back to SocialLogin.login() (may show picker)...');
             const response = await SocialLogin.login({
                 provider: 'google',
                 options: { scopes: this.SCOPES }
@@ -75,16 +202,18 @@ export const googleApi = {
             }
             this.accessToken = token;
             localStorage.setItem('google_access_token', this.accessToken);
-            console.log('[GoogleAPI] Token refreshed successfully.');
+            localStorage.setItem('google_token_time', Date.now().toString());
+            console.log('[GoogleAPI] Token refreshed via login fallback.');
             return this.accessToken;
         } catch (error) {
-            console.error('[GoogleAPI] Failed to refresh token silently:', error);
+            console.error('[GoogleAPI] All refresh methods failed:', error);
             throw error;
         }
     },
 
     async signOutGoogle() {
         try {
+            await this.initialize();
             await SocialLogin.logout({ provider: 'google' });
             this.accessToken = null;
         } catch (error) {
@@ -97,18 +226,17 @@ export const googleApi = {
     },
 
     async listFilesFromFolder(folderId) {
-        if (!this.accessToken) throw new Error('인증 토큰이 없습니다.');
         if (!folderId) throw new Error('폴더 ID가 설정되지 않았습니다.');
 
         const q = encodeURIComponent(`'${folderId}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`);
         const url = `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=modifiedTime desc&fields=files(id,name,modifiedTime)`;
 
-        const response = await fetch(url, {
-            headers: { 'Authorization': `Bearer ${this.accessToken}` }
-        });
+        const response = await this._request(url);
 
-        if (response.status === 401) throw new Error('[AUTH_EXPIRED] 토큰이 만료되었습니다.');
-        if (!response.ok) throw new Error(`파일 목록 조회 실패: ${response.status}`);
+        if (!response.ok) {
+            if (response.status === 401) throw new Error('[AUTH_EXPIRED] 토큰이 만료되었습니다.');
+            throw new Error(`파일 목록 조회 실패: ${response.status}`);
+        }
 
         const data = await response.json();
         return data.files || [];
@@ -128,16 +256,14 @@ export const googleApi = {
     },
 
     async fetchSheetData(sheetId) {
-        if (!this.accessToken) throw new Error('인증 토큰이 없습니다.');
-
         console.log(`[GoogleAPI] Fetching data for file: ${sheetId}`);
         const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets(properties(title))`;
-        const metaResponse = await fetch(metaUrl, {
-            headers: { 'Authorization': `Bearer ${this.accessToken}` }
-        });
+        const metaResponse = await this._request(metaUrl);
 
-        if (metaResponse.status === 401) throw new Error('[AUTH_EXPIRED] 토큰이 만료되었습니다.');
-        if (!metaResponse.ok) throw new Error(`스프레드시트 정보를 가져오지 못했습니다. (Status: ${metaResponse.status})`);
+        if (!metaResponse.ok) {
+            if (metaResponse.status === 401) throw new Error('[AUTH_EXPIRED] 토큰이 만료되었습니다.');
+            throw new Error(`스프레드시트 정보를 가져오지 못했습니다. (Status: ${metaResponse.status})`);
+        }
 
         const metadata = await metaResponse.json();
         const allSheetTitles = metadata.sheets.map(s => s.properties.title);
@@ -148,16 +274,20 @@ export const googleApi = {
             const lowerTitle = title.toLowerCase().replace(/\s/g, '');
             let type = '';
 
-            // Inclusive mapping for "Users"
-            if (lowerTitle.includes('users') || lowerTitle.includes('인사') || lowerTitle.includes('사용자') || lowerTitle.includes('사원')) {
+            // 1. Exact matches for requested names
+            if (lowerTitle === 'users') {
                 type = 'users';
-            }
-            // Inclusive mapping for "Trade"
-            else if (lowerTitle.includes('trade') || lowerTitle.includes('거래') || lowerTitle.includes('변동') || lowerTitle.includes('이력') || lowerTitle.includes('변경')) {
+            } else if (lowerTitle === 'trade') {
                 type = 'trade';
+            } else if (lowerTitle === 'assets') {
+                type = 'assets';
             }
-            // Lenient mapping for primary "Assets" or data sheets
-            else if (lowerTitle === 'assets' || lowerTitle === '자산현황' || lowerTitle === '자산' || lowerTitle === '현황' || lowerTitle === 'sheet1' || lowerTitle === '시트1') {
+            // 2. Lenient Korean mappings (fallback)
+            else if (lowerTitle.includes('인사') || lowerTitle.includes('사용자') || lowerTitle.includes('사원')) {
+                type = 'users';
+            } else if (lowerTitle.includes('거래') || lowerTitle.includes('변동') || lowerTitle.includes('이력') || lowerTitle.includes('변경') || lowerTitle.includes('추적')) {
+                type = 'trade';
+            } else if (lowerTitle.includes('자산') || lowerTitle.includes('현황') || lowerTitle.includes('대장') || lowerTitle.includes('목록') || lowerTitle === 'sheet1' || lowerTitle === '시트1') {
                 type = 'assets';
             }
 
@@ -168,11 +298,8 @@ export const googleApi = {
 
             console.log(`[GoogleAPI] Loading sheet: "${title}" as type: [${type}]`);
             const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(title)}!A:ZZ`;
-            const response = await fetch(url, {
-                headers: { 'Authorization': `Bearer ${this.accessToken}` }
-            });
+            const response = await this._request(url);
 
-            if (response.status === 401) throw new Error('[AUTH_EXPIRED] 토큰이 만료되었습니다.');
             if (response.ok) {
                 const data = await response.json();
                 const sheetAssets = this.parseRangeToJson(data.values || [], title, type);
@@ -191,13 +318,9 @@ export const googleApi = {
     },
 
     async updateSheet(sheetId, assets) {
-        if (!this.accessToken) throw new Error('인증 토큰이 없습니다.');
-
         // 1. 현재 스프레드시트의 실제 시트 목록 가져오기 (시트명 불일치 방지)
         const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets(properties(title))`;
-        const metaRes = await fetch(metaUrl, {
-            headers: { 'Authorization': `Bearer ${this.accessToken}` }
-        });
+        const metaRes = await this._request(metaUrl);
         const metaData = await metaRes.json();
         const existingSheets = metaData.sheets.map(s => s.properties.title);
         const firstSheet = existingSheets[0] || 'Sheet1';
@@ -218,17 +341,14 @@ export const googleApi = {
             const values = this.jsonToRange(sheetAssets);
             const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(sheetName)}!A1?valueInputOption=USER_ENTERED`;
 
-            const response = await fetch(url, {
+            const response = await this._request(url, {
                 method: 'PUT',
-                headers: {
-                    'Authorization': `Bearer ${this.accessToken}`,
-                    'Content-Type': 'application/json'
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ values })
             });
 
-            if (response.status === 401) throw new Error('[AUTH_EXPIRED] 토큰이 만료되었습니다.');
             if (!response.ok) {
+                if (response.status === 401) throw new Error('[AUTH_EXPIRED] 토큰이 만료되었습니다.');
                 const errDetail = await response.text();
                 console.error(`Update failed detail: ${errDetail}`);
                 throw new Error(`${sheetName} 시트 업데이트 실패: ${response.status}`);
@@ -237,26 +357,24 @@ export const googleApi = {
     },
 
     async createSessionFile(masterId, sessionName, assets) {
-        if (!this.accessToken) throw new Error('인증 토큰이 없습니다.');
         if (!this.BACKUP_FOLDER_ID) throw new Error('저장 폴더(BACKUP_FOLDER_ID)가 설정되지 않았습니다.');
 
         console.log(`Creating new flat session spreadsheet: ${sessionName}`);
 
         // 1. Create a fresh spreadsheet
         const createUrl = `https://sheets.googleapis.com/v4/spreadsheets`;
-        const createRes = await fetch(createUrl, {
+        const createRes = await this._request(createUrl, {
             method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${this.accessToken}`,
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 properties: { title: sessionName }
             })
         });
 
-        if (createRes.status === 401) throw new Error('[AUTH_EXPIRED] 토큰이 만료되었습니다.');
-        if (!createRes.ok) throw new Error(`스프레드시트 생성 실패: ${createRes.status}`);
+        if (!createRes.ok) {
+            if (createRes.status === 401) throw new Error('[AUTH_EXPIRED] 토큰이 만료되었습니다.');
+            throw new Error(`스프레드시트 생성 실패: ${createRes.status}`);
+        }
 
         const newSheet = await createRes.json();
         const sheetId = newSheet.spreadsheetId;
@@ -265,10 +383,7 @@ export const googleApi = {
 
         // 2. Move to Backup Folder
         const moveUrl = `https://www.googleapis.com/drive/v3/files/${sheetId}?addParents=${this.BACKUP_FOLDER_ID}&removeParents=root`;
-        await fetch(moveUrl, {
-            method: 'PATCH',
-            headers: { 'Authorization': `Bearer ${this.accessToken}` }
-        });
+        await this._request(moveUrl, { method: 'PATCH' });
 
         // 3. Prepare data for the single "results" sheet
         if (assets.length > 0) {
@@ -299,12 +414,9 @@ export const googleApi = {
             ];
 
             const updateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(firstSheetTitle)}!A1?valueInputOption=USER_ENTERED`;
-            const updateRes = await fetch(updateUrl, {
+            const updateRes = await this._request(updateUrl, {
                 method: 'PUT',
-                headers: {
-                    'Authorization': `Bearer ${this.accessToken}`,
-                    'Content-Type': 'application/json'
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ values })
             });
 
@@ -326,78 +438,64 @@ export const googleApi = {
     },
 
     async getOrCreateGlobalTradeLog() {
-        if (!this.accessToken) throw new Error('인증 토큰이 없습니다.');
-
-        // 1. Search for existing file
-        const q = encodeURIComponent(`name='${this.TRADE_LOG_FILE_NAME}' and '${this.BACKUP_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`);
-        const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`;
-        const searchRes = await fetch(searchUrl, {
-            headers: { 'Authorization': `Bearer ${this.accessToken}` }
-        });
+        // 1. Search for existing file anywhere in the user's drive
+        const q = encodeURIComponent(`name='${this.TRADE_LOG_FILE_NAME}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`);
+        const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime desc&fields=files(id,name)`;
+        const searchRes = await this._request(searchUrl);
         const searchData = await searchRes.json();
 
         if (searchData.files && searchData.files.length > 0) {
             const fileId = searchData.files[0].id;
             // Get the first sheet name
             const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${fileId}?fields=sheets(properties(title))`;
-            const metaRes = await fetch(metaUrl, { headers: { 'Authorization': `Bearer ${this.accessToken}` } });
+            const metaRes = await this._request(metaUrl);
             const metaData = await metaRes.json();
             const sheetTitle = metaData.sheets[0].properties.title;
 
             // Check if headers exist
             const getUrl = `https://sheets.googleapis.com/v4/spreadsheets/${fileId}/values/${encodeURIComponent(sheetTitle)}!A1:Z1`;
-            const getRes = await fetch(getUrl, { headers: { 'Authorization': `Bearer ${this.accessToken}` } });
+            const getRes = await this._request(getUrl);
             const getData = await getRes.json();
 
             if (!getData.values || getData.values.length === 0 || getData.values[0].length === 0) {
                 console.log('[GoogleAPI] Global Trade Log headers missing, initializing...');
-                const headers = ['date', 'asset_number', 'cj_id', 'ex_user', 'note', 'timestamp'];
+                const headers = ['unique_key', 'date', 'asset_number', 'cj_id', 'ex_user', 'note', 'timestamp'];
                 const updateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${fileId}/values/${encodeURIComponent(sheetTitle)}!A1?valueInputOption=USER_ENTERED`;
-                await fetch(updateUrl, {
+                await this._request(updateUrl, {
                     method: 'PUT',
-                    headers: {
-                        'Authorization': `Bearer ${this.accessToken}`,
-                        'Content-Type': 'application/json'
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ values: [headers] })
                 });
             }
             return { id: fileId, name: this.TRADE_LOG_FILE_NAME, sheetTitle };
         }
 
-        // 2. Create if not exists
-        console.log('[GoogleAPI] Creating new Global Trade Log file...');
-        const createUrl = `https://sheets.googleapis.com/v4/spreadsheets`;
-        const createRes = await fetch(createUrl, {
+        // 2. If not found, create it in the main Data folder (FOLDER_ID)
+        console.log('[GoogleAPI] Global trade log file not found. Creating a new one...');
+        const createRes = await this._request('https://www.googleapis.com/drive/v3/files', {
             method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${this.accessToken}`,
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                properties: { title: this.TRADE_LOG_FILE_NAME }
+                name: this.TRADE_LOG_FILE_NAME,
+                mimeType: 'application/vnd.google-apps.spreadsheet',
+                parents: [this.FOLDER_ID]
             })
         });
-        const newSheet = await createRes.json();
-        const sheetId = newSheet.spreadsheetId;
-        const sheetTitle = newSheet.sheets[0].properties.title;
+        const newSheetFile = await createRes.json();
+        const sheetId = newSheetFile.id;
 
-        // Move to backup folder
-        const moveUrl = `https://www.googleapis.com/drive/v3/files/${sheetId}?addParents=${this.BACKUP_FOLDER_ID}&removeParents=root`;
-        await fetch(moveUrl, {
-            method: 'PATCH',
-            headers: { 'Authorization': `Bearer ${this.accessToken}` }
-        });
+        // Fetch sheet properties to get the first sheet title
+        const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=sheets(properties(title))`;
+        const metaRes = await this._request(metaUrl);
+        const metaData = await metaRes.json();
+        const sheetTitle = metaData.sheets[0].properties.title;
 
         // Initialize header
-        const headers = ['date', 'asset_number', 'cj_id', 'ex_user', 'note', 'timestamp'];
+        const headers = ['unique_key', 'date', 'asset_number', 'cj_id', 'ex_user', 'note', 'timestamp'];
         const updateUrl = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(sheetTitle)}!A1?valueInputOption=USER_ENTERED`;
-        await fetch(updateUrl, {
+        await this._request(updateUrl, {
             method: 'PUT',
-            headers: {
-                'Authorization': `Bearer ${this.accessToken}`,
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ values: [headers] })
         });
 
@@ -411,9 +509,7 @@ export const googleApi = {
             console.log(`[GoogleAPI] Target file: ${file.name}, ID: ${file.id}, Sheet: ${file.sheetTitle}`);
 
             const url = `https://sheets.googleapis.com/v4/spreadsheets/${file.id}/values/${encodeURIComponent(file.sheetTitle)}!A:ZZ`;
-            const response = await fetch(url, {
-                headers: { 'Authorization': `Bearer ${this.accessToken}` }
-            });
+            const response = await this._request(url);
 
             if (response.ok) {
                 const data = await response.json();
@@ -433,26 +529,32 @@ export const googleApi = {
     },
 
     async appendGlobalTradeLog(log) {
-        if (!this.accessToken) throw new Error('인증 토큰이 없습니다.');
         const file = await this.getOrCreateGlobalTradeLog();
 
-        // Headers: ['date', 'asset_number', 'cj_id', 'ex_user', 'note', 'timestamp']
+        const dateVal = log.date || new Date().toISOString().split('T')[0];
+        const assetVal = log.asset_number || '';
+        const cjIdVal = log.cj_id || '';
+        const exUserVal = log.ex_user || '';
+        const noteVal = log.note || '';
+        
+        // Generate a unique key for deduplication
+        const uniqueKey = `${dateVal.replace(/[^0-9]/g, '')}_${assetVal.replace(/\s/g, '').toLowerCase()}_${cjIdVal.replace(/\s/g, '').toLowerCase()}_${exUserVal.replace(/\s/g, '').toLowerCase()}_${noteVal.replace(/\s/g, '').toLowerCase()}`;
+
+        // Headers: ['unique_key', 'date', 'asset_number', 'cj_id', 'ex_user', 'note', 'timestamp']
         const row = [
-            log.date || new Date().toISOString().split('T')[0],
-            log.asset_number || '',
-            log.cj_id || '',
+            uniqueKey,
+            dateVal,
+            assetVal,
+            cjIdVal,
             log.ex_user || '',
             log.note || '',
             new Date().toISOString()
         ];
 
-        const url = `https://sheets.googleapis.com/v4/spreadsheets/${file.id}/values/${encodeURIComponent(file.sheetTitle)}!A1:append?valueInputOption=USER_ENTERED`;
-        const response = await fetch(url, {
+        const url = `https://sheets.googleapis.com/v4/spreadsheets/${file.id}/values/${encodeURIComponent(file.sheetTitle)}!A1:append?valueInputOption=RAW`;
+        const response = await this._request(url, {
             method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${this.accessToken}`,
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ values: [row] })
         });
 
@@ -462,24 +564,29 @@ export const googleApi = {
     },
 
     async syncMasterTradeToGlobal(masterTradeLogs) {
-        if (!this.accessToken) throw new Error('인증 토큰이 없습니다.');
         const globalFile = await this.getOrCreateGlobalTradeLog();
 
         // 1. Fetch current global logs
-        const globalResponse = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${globalFile.id}/values/${encodeURIComponent(globalFile.sheetTitle)}!A:ZZ`, {
-            headers: { 'Authorization': `Bearer ${this.accessToken}` }
-        });
+        const globalResponse = await this._request(`https://sheets.googleapis.com/v4/spreadsheets/${globalFile.id}/values/${encodeURIComponent(globalFile.sheetTitle)}!A:ZZ`);
         const globalData = await globalResponse.json();
         const globalRows = globalData.values || [[]];
 
-        // 2. Parse existing global logs for deduplication
+        // 2. Parse existing global logs for deduplication using unique_key
         const existingKeys = new Set();
         if (globalRows.length > 1) {
             globalRows.slice(1).forEach(row => {
-                const date = row[0] || '';
-                const assetNo = row[1] || '';
-                const cjId = row[2] || '';
-                existingKeys.add(`${date}_${assetNo}_${cjId}`);
+                const uniqueKey = (row[0] || '').toString().trim();
+                if (uniqueKey) {
+                    existingKeys.add(uniqueKey);
+                } else {
+                    // Fallback for any malformed rows
+                    const date = (row[1] || '').toString().replace(/[^0-9]/g, '');
+                    const assetNo = (row[2] || '').toString().replace(/\s/g, '').toLowerCase();
+                    const cjId = (row[3] || '').toString().replace(/\s/g, '').toLowerCase();
+                    const exUser = (row[4] || '').toString().replace(/\s/g, '').toLowerCase();
+                    const note = (row[5] || '').toString().replace(/\s/g, '').toLowerCase();
+                    existingKeys.add(`${date}_${assetNo}_${cjId}_${exUser}_${note}`);
+                }
             });
         }
         console.log(`[GoogleAPI] Existing global log keys: ${existingKeys.size}`);
@@ -487,22 +594,32 @@ export const googleApi = {
         // 3. Filter only NEW logs from master
         const newRows = [];
         masterTradeLogs.forEach(log => {
-            const date = this._getVal(log, 'date') || '';
-            const assetNo = this._getVal(log, 'asset_number') || '';
-            const cjId = this._getVal(log, 'cj_id') || '';
+            const rawDate = this._getVal(log, 'date') || '';
+            const rawAssetNo = this._getVal(log, 'asset_number') || '';
+            const rawCjId = this._getVal(log, 'cj_id') || '';
+            const rawExUser = this._getVal(log, 'ex_user') || '';
+            const rawNote = this._getVal(log, 'note') || 'Master Sync';
 
-            if (!date || !assetNo) return; // Skip invalid entries
+            if (!rawDate || !rawAssetNo) return; // Skip invalid entries
 
-            const key = `${date}_${assetNo}_${cjId}`;
-            if (!existingKeys.has(key)) {
+            const date = rawDate.toString().replace(/[^0-9]/g, '');
+            const assetNo = rawAssetNo.toString().replace(/\s/g, '').toLowerCase();
+            const cjId = rawCjId.toString().replace(/\s/g, '').toLowerCase();
+            const exUser = rawExUser.toString().replace(/\s/g, '').toLowerCase();
+            const note = rawNote.toString().replace(/\s/g, '').toLowerCase();
+
+            const uniqueKey = `${date}_${assetNo}_${cjId}_${exUser}_${note}`;
+            if (!existingKeys.has(uniqueKey)) {
                 newRows.push([
-                    date,
-                    assetNo,
-                    cjId,
-                    this._getVal(log, 'ex_user') || '',
-                    this._getVal(log, 'note') || 'Master Sync',
+                    uniqueKey,
+                    rawDate,
+                    rawAssetNo,
+                    rawCjId,
+                    rawExUser,
+                    rawNote,
                     new Date().toISOString()
                 ]);
+                existingKeys.add(uniqueKey);
             }
         });
 
@@ -514,13 +631,10 @@ export const googleApi = {
         }
 
         // 4. Append new logs to global file
-        const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${globalFile.id}/values/${encodeURIComponent(globalFile.sheetTitle)}!A1:append?valueInputOption=USER_ENTERED`;
-        const response = await fetch(appendUrl, {
+        const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${globalFile.id}/values/${encodeURIComponent(globalFile.sheetTitle)}!A1:append?valueInputOption=RAW`;
+        const response = await this._request(appendUrl, {
             method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${this.accessToken}`,
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ values: newRows })
         });
 
@@ -537,9 +651,9 @@ export const googleApi = {
         if (!obj) return null;
         const aliases = {
             asset_number: ['assetnumber', '자산번호', '관리번호', 'assetno', 'no', '관리no'],
-            cj_id: ['cjid', '사번', 'id', 'cj_id'],
-            date: ['date', '업무일자', '일자', '날짜', 'timestamp'],
-            ex_user: ['ex_user', '이전사용자', 'asset_in_user', 'prev_user'],
+            cj_id: ['cjid', '사번', 'id', 'cj_id', '사용자id', '사용자사번'],
+            date: ['date', '업무일자', '일자', '날짜', 'timestamp', '수정일', '변경일', '작업일자', '시간', '수정시간', '생성일'],
+            ex_user: ['ex_user', '이전에사용하던사람', '이전사용자', 'asset_in_user', 'prev_user'],
             note: ['note', '메모', '비고', '사항']
         };
         const targets = (aliases[key] || [key]).map(t => t.toLowerCase().replace(/[\s_]/g, ''));

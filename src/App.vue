@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { useAssetStore } from './store/assetStore'
+import { googleApi } from './api/google'
 import { 
   Search, 
   Barcode, 
@@ -34,6 +35,7 @@ import {
   CloudUpload
 } from 'lucide-vue-next'
 import { Network } from '@capacitor/network'
+import { Keyboard } from '@capacitor/keyboard'
 import AssetCard from './components/AssetCard.vue'
 
 const store = useAssetStore()
@@ -42,6 +44,7 @@ const showDeptModal = ref(false)
 const showProjectSelector = ref(false)
 const sessionName = ref('')
 const deptSearchQuery = ref('')
+const isKeyboardVisible = ref(false)
 
 // --- 커스텀 확인 모달 상태 ---
 const confirmModal = ref({
@@ -121,14 +124,17 @@ watch(() => store.masterFiles, (newFiles) => {
   }
 }, { immediate: true })
 
-// Auto-sync master metadata every 5 minutes
-let syncInterval = null
 // Auto-login on mount
 onMounted(async () => {
   const savedToken = localStorage.getItem('google_access_token')
-    if (savedToken) {
+  if (savedToken) {
     accessTokenInput.value = savedToken
+    
+    // 저장된 토큰을 API에 설정하고 로컬 캐시에서 초기화
+    // 구글 API 호출은 하지 않음 (동기화 버튼 시에만 접속)
+    googleApi.setToken(savedToken)
     await store.initializeData(savedToken)
+    
     if (store.isAuthenticated) {
       showLogin.value = false
       
@@ -143,22 +149,33 @@ onMounted(async () => {
       if (!selectedMaster.value && store.masterFiles.length > 0) {
         selectedMaster.value = store.masterFiles[0]
       }
-      
-      // Check if master sync is needed (Once a day after 06:00)
-      store.checkAndSyncMaster()
     }
   }
+      
+  // 토큰 체크 타이머 및 visibility 리스너 제거됨
+  // 구글 API 접속은 performDailySync() 시에만 발생
 
   // Network Status Monitoring
-  const status = await Network.getStatus()
-  store.isOnline = status.connected
-  
-  Network.addListener('networkStatusChange', status => {
+  try {
+    const status = await Network.getStatus()
     store.isOnline = status.connected
-    if (status.connected && store.hasPendingSync) {
-      console.log('[Network] Back online, triggering auto-sync...')
-      store.triggerDebouncedSave()
-    }
+    
+    Network.addListener('networkStatusChange', status => {
+      store.isOnline = status.connected
+      if (status.connected && store.hasPendingSync) {
+        console.log('[Network] Back online. Pending changes will be uploaded on next sync.')
+      }
+    })
+  } catch (e) {
+    console.warn('Network plugin not available', e)
+  }
+
+  // Keyboard Event Listeners
+  Keyboard.addListener('keyboardWillShow', () => {
+    isKeyboardVisible.value = true
+  })
+  Keyboard.addListener('keyboardWillHide', () => {
+    isKeyboardVisible.value = false
   })
 })
 
@@ -167,12 +184,10 @@ watch(() => store.isAuthenticated, (val) => {
   if (val) {
     showLogin.value = false
     showProjectSelector.value = true
+  } else {
+    showLogin.value = true
+    showProjectSelector.value = false
   }
-})
-
-import { onUnmounted } from 'vue'
-onUnmounted(() => {
-  if (syncInterval) clearInterval(syncInterval)
 })
 
 const barcodeValue = ref('')
@@ -191,7 +206,6 @@ const handleLogin = async () => {
     if (store.masterFiles.length > 0) {
       selectedMaster.value = store.masterFiles[0]
     }
-    await store.checkAndSyncMaster()
   }
 }
 
@@ -244,8 +258,7 @@ const searchStats = computed(() => {
 })
 
 const handleSyncMaster = async () => {
-  await store.refreshMasterMetadata()
-  store.showToast('마스터 데이터가 최신 상태로 동기화되었습니다.', 'success')
+  await store.performDailySync()
 }
 
 const handleResumeSession = async (file) => {
@@ -303,8 +316,13 @@ const handleBarcodeEnter = async () => {
   const asset = store.assets.find(a => a.assetNumber === barcodeValue.value)
   if (asset) {
     if (asset.status === 'checked') {
-      // 실사 탭 전용 검색어만 설정 (검색 탭에 영향 없음)
-      store.inspectionSearchQuery = barcodeValue.value
+      store.inspectionSearchQuery = ''
+      
+      // 이미 스캔된 목록의 맨 위로 끌어올리기 (최신화)
+      store.scannedAssetIds = store.scannedAssetIds.filter(id => id !== barcodeValue.value)
+      store.scannedAssetIds.push(barcodeValue.value)
+      store._persistSession()
+
       store.showToast(`이미 실사 완료된 자산입니다. (${barcodeValue.value})`, 'info')
     } else {
       store.inspectionSearchQuery = '' 
@@ -367,18 +385,22 @@ const handleTrackAsset = (assetNumber) => {
   <header class="glass header">
     <div class="header-top">
       <h1>Asset Manager</h1>
-      <div class="sync-status" :class="{ syncing: store.isSyncing, offline: !store.isOnline }">
+      <div class="sync-status" :class="{ syncing: store.isSyncingMaster, offline: !store.isOnline, 'needs-sync': store.needsDailySync }">
         <template v-if="!store.isOnline">
           <WifiOff size="14" class="status-icon" />
           <span>오프라인 환경</span>
         </template>
-        <template v-else-if="store.isSyncing">
+        <template v-else-if="store.isSyncingMaster">
           <RefreshCw size="14" class="spin-icon" />
-          <span>저장 중...</span>
+          <span>동기화 중...</span>
+        </template>
+        <template v-else-if="store.needsDailySync">
+          <CloudUpload size="14" class="blink-icon" />
+          <span>동기화 필요</span>
         </template>
         <template v-else-if="store.hasPendingSync">
-          <CloudUpload size="14" class="blink-icon" />
-          <span>동기화 대기 중</span>
+          <CloudOff size="14" class="blink-icon" />
+          <span>로컬 저장됨 (미업로드)</span>
         </template>
         <template v-else-if="store.lastSavedAt">
           <CheckCircle size="14" />
@@ -392,7 +414,7 @@ const handleTrackAsset = (assetNumber) => {
     </div>
   </header>
 
-  <main class="content">
+  <main class="content" :class="{ 'keyboard-visible': isKeyboardVisible }">
     <!-- Login / Token Input -->
     <div v-if="showLogin" class="tab-content login-screen">
       <div class="glass auth-card">
@@ -464,9 +486,9 @@ const handleTrackAsset = (assetNumber) => {
               <span>{{ selectedMaster.name }}</span>
             </div>
             <div v-else class="master-not-found">
-              <span class="text-muted">마스터 파일을 불러오는 중...</span>
-              <button @click="handleRetryList" class="retry-btn">
-                <RefreshCw size="14" /> 다시 시도
+              <span class="text-muted">마스터 데이터가 없습니다. (초기 동기화 필요)</span>
+              <button @click="store.performDailySync" class="retry-btn" :disabled="store.isSyncingMaster">
+                <RefreshCw size="14" :class="{ 'spin-icon': store.isSyncingMaster }" /> 데이터 동기화
               </button>
             </div>
           </div>
@@ -648,7 +670,7 @@ const handleTrackAsset = (assetNumber) => {
             <div class="history-timeline">
               <div v-for="(log, lIdx) in group.logs" :key="lIdx" class="timeline-item">
                 <div class="timeline-meta">
-                  <span class="timeline-date">{{ store._getVal(log, 'timestamp') || store._getVal(log, 'date') || store._getVal(log, '업무일자') }}</span>
+                  <span class="timeline-date">{{ log._dateStr }}</span>
                 </div>
                 
                 <div class="timeline-content">
@@ -678,7 +700,7 @@ const handleTrackAsset = (assetNumber) => {
         </div>
 
         <!-- Load More for Reference -->
-        <div v-if="activeTab === 'reference' && store.referenceLimit < store.tradeLogs.length" class="load-more-container">
+        <div v-if="activeTab === 'reference' && store.referenceLimit < store.tradeLogGroupCount" class="load-more-container">
           <button @click="loadMore" class="glass load-more-btn">
              데이터 더 보기
           </button>
@@ -712,25 +734,26 @@ const handleTrackAsset = (assetNumber) => {
           </div>
         </button>
 
-        <button class="glass action-card sync-master" @click="handleSyncMaster" :disabled="store.loading">
+        <button class="glass action-card sync-master" @click="handleSyncMaster" :disabled="store.loading || store.isSyncingMaster">
           <div class="action-icon">
-            <RefreshCw size="20" />
+            <RefreshCw size="20" :class="{ 'spin-icon': store.isSyncingMaster }" />
           </div>
           <div class="action-info">
-            <span class="action-title">마스터 데이터 동기화</span>
-            <span class="action-desc">최신 인사정보 및 거래이력을 동기화합니다.</span>
+            <span class="action-title">전체 데이터 동기화</span>
+            <span class="action-desc">로컬 변경사항 업로드 + 마스터 데이터 다운로드 (하루 1회 권장)</span>
           </div>
+          <div v-if="store.needsDailySync" class="pending-badge">!</div>
         </button>
         
-        <button class="glass action-card sync-now" @click="store.saveDataInBackground" :disabled="store.loading || !store.isOnline || !store.hasPendingSync">
+        <button class="glass action-card sync-now" @click="store.saveDataInBackground" :disabled="true">
           <div class="action-icon">
             <CloudUpload size="20" />
           </div>
           <div class="action-info">
-            <span class="action-title">즉시 동기화</span>
-            <span class="action-desc">대기 중인 변경사항을 지금 업로드합니다.</span>
+            <span class="action-title">로컬 저장 상태</span>
+            <span class="action-desc">{{ store.hasPendingSync ? '미업로드 변경사항 있음 (동기화 시 업로드됨)' : '모든 변경사항 업로드 완료' }}</span>
           </div>
-          <div v-if="store.hasPendingSync" class="pending-badge">!</div>
+          <div v-if="store.pendingTradeLogs.length > 0" class="pending-badge">{{ store.pendingTradeLogs.length }}</div>
         </button>
 
         <button class="glass action-card logout" @click="handleLogout">
@@ -749,7 +772,7 @@ const handleTrackAsset = (assetNumber) => {
   </main>
 
     <!-- Bottom Navigation -->
-    <nav class="glass bottom-nav">
+    <nav class="glass bottom-nav" :class="{ 'keyboard-hidden': isKeyboardVisible }">
       <button @click="activeTab = 'inspection'" :class="{ active: activeTab === 'inspection' }">
         <Barcode />
         <span>실사</span>
@@ -913,6 +936,11 @@ h1 {
   flex: 1;
   padding: 12px 16px calc(110px + env(safe-area-inset-bottom)) 16px;
   overflow-y: auto;
+  transition: padding-bottom 0.3s ease;
+}
+
+.content.keyboard-visible {
+  padding-bottom: 24px;
 }
 
 .input-section, .search-section {
@@ -1100,6 +1128,13 @@ h1 {
   border-bottom: none;
   z-index: 1000;
   box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.5);
+  transition: transform 0.3s ease, opacity 0.3s ease;
+}
+
+.bottom-nav.keyboard-hidden {
+  transform: translateY(100%);
+  opacity: 0;
+  pointer-events: none;
 }
 
 .bottom-nav button {

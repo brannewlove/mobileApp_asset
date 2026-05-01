@@ -50,7 +50,20 @@ npx cap add android
 
 ---
 
-## 3. 안드로이드 빌드 및 설치 가이드
+## 3. 마스터 데이터(Master Sheet) 동기화 조건
+
+앱에서 동기화할 기준이 되는 마스터 스프레드시트는 다음 조건을 충족해야 합니다.
+
+- **마스터 파일 위치**: `https://drive.google.com/drive/folders/1FK2Opt907pBIsETpULcOWedY_X52pCy-` (지정된 Data 폴더) 내부에 위치한 **가장 최근에 수정된 파일**을 마스터로 자동 인식합니다.
+- **참조 시트 구조**: 해당 파일 안에는 다음의 3가지 데이터를 담은 시트(탭)가 포함되어 있어야 하며, 권장 시트명은 다음과 같습니다.
+  1. **`users`** (인사/사용자 정보)
+  2. **`assets`** (자산 기본 정보 및 대장)
+  3. **`trade`** (자산 이동 및 이력/추적 기록)
+- 앱은 위 시트들을 참조하여 로컬 데이터 및 `APP_GLOBAL_TRADE_LOGS_V2` 파일과 자동으로 동기화를 수행합니다.
+
+---
+
+## 4. 안드로이드 빌드 및 설치 가이드
 
 ### 단계별 절차
 1. **웹 빌드**: 최신 웹 소스를 생성합니다.
@@ -72,7 +85,7 @@ npx cap add android
 
 ---
 
-## 4. 깃허브(GitHub) 업데이트 및 동기화
+## 5. 깃허브(GitHub) 업데이트 및 동기화
 
 최신 소스코드를 유지하고 반영하는 방법입니다.
 
@@ -97,7 +110,7 @@ git push origin main
 
 ---
 
-## 5. 테스트 체크리스트
+## 6. 테스트 체크리스트
 
 새 환경에서 다음 항목이 정상 동작하는지 확인하십시오.
 
@@ -111,3 +124,6 @@ git push origin main
 
 > [!TIP]
 > **로그인이 안 될 때**: `capacitor.config.json`의 `webClientId`가 구글 콘솔의 값과 일치하는지, 그리고 현재 접속 중인 도메인(웹) 또는 앱의 서명(SHA-1)이 구글 콘솔에 등록되어 있는지 확인하세요.
+
+빌드 경로
+C:\Users\LeeJH\.gemini\antigravity\scratch\asset-manager-android\android\app\build\outputs\apk\debug

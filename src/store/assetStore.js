@@ -25,7 +25,11 @@ export const useAssetStore = defineStore('asset', {
         saveTimeout: null,
         referenceLimit: 20,
         isOnline: true,
-        hasPendingSync: JSON.parse(localStorage.getItem('has_pending_sync') || 'false')
+        hasPendingSync: JSON.parse(localStorage.getItem('has_pending_sync') || 'false'),
+        tokenRefreshTimer: null,
+        isSyncingMaster: false,
+        pendingTradeLogs: JSON.parse(localStorage.getItem('pending_trade_logs') || '[]'),
+        needsDailySync: false
     }),
 
     getters: {
@@ -59,65 +63,66 @@ export const useAssetStore = defineStore('asset', {
 
 
 
+        usersMap: (state) => {
+            const map = new Map();
+            state.users.forEach(u => {
+                const cid = state._getVal(u, 'cj_id')?.toString();
+                if (cid) map.set(cid, u);
+            });
+            return map;
+        },
+
         filteredTradeLogs: (state) => {
-            const getVal = (obj, key) => {
-                const aliases = {
-                    cj_id: ['cjid', '사번', 'id', 'cj_id'],
-                    asset_number: ['assetnumber', '자산번호', '관리번호', 'assetno', 'no', '관리no'],
-                    date: ['date', '업무일자', '일자', '날짜', 'timestamp'],
-                    ex_user: ['ex_user', '이전사용자', 'asset_in_user', 'prev_user'],
-                    user_name: ['username', '사용자', '성함', '성명', '이름', 'name', 'user'],
-                    department: ['department', '부서', '소속', 'part', '팀', '팀명', '부서명']
-                };
-                const targets = (aliases[key] || [key]).map(t => t.toLowerCase().replace(/[\s_]/g, ''));
-                const foundKey = Object.keys(obj).find(k => targets.includes(k.toLowerCase().replace(/[\s_]/g, '')));
-                return foundKey ? obj[foundKey] : null;
-            };
+            if (!state.globalTradeLogs || state.globalTradeLogs.length === 0) return [];
 
-            let rawLogs = [...state.globalTradeLogs];
+            const usersMap = state.usersMap;
+            const q = state.referenceSearchQuery?.toLowerCase();
 
-            // Deduplicate logs: key = date + assetNo + cjId
-            const uniqueLogsMap = new Map();
-            rawLogs.forEach(log => {
-                const assetNo = getVal(log, 'asset_number') || 'Unknown';
-                const cjId = getVal(log, 'cj_id') || '';
-                const date = getVal(log, 'date') || '0000-00-00';
-                const key = `${date}_${assetNo}_${cjId}`;
-                if (!uniqueLogsMap.has(key)) {
-                    uniqueLogsMap.set(key, log);
+            // 1. Group and deduplicate in one pass
+            const groups = {};
+            state.globalTradeLogs.forEach(log => {
+                const assetNo = log._assetNo || 'Unknown';
+                const cjId = log._cjId || '';
+                const date = log._dateStr || '0000-00-00';
+
+                // Fast search check if query exists
+                if (q) {
+                    const match = [assetNo, cjId, date, log._note, log._exUserId]
+                        .some(v => (v || '').toString().toLowerCase().includes(q));
+                    if (!match) return;
+                }
+
+                if (!groups[assetNo]) groups[assetNo] = { assetNo, itemsMap: new Map(), lastUpdate: '0000-00-00' };
+
+                const uniqueKey = `${date}_${cjId}`;
+                if (!groups[assetNo].itemsMap.has(uniqueKey)) {
+                    const exUserId = log._exUserId;
+                    const user = usersMap.get(cjId);
+                    const exUser = exUserId ? usersMap.get(exUserId) : null;
+
+                    const processedLog = {
+                        ...log,
+                        _exUserName: exUser ? state._getVal(exUser, 'user_name') : (exUserId || ''),
+                        _exUserPart: exUser ? state._getVal(exUser, 'department') : '',
+                        _joinedName: user ? state._getVal(user, 'user_name') : (cjId || ''),
+                        _joinedPart: user ? state._getVal(user, 'department') : ''
+                    };
+                    groups[assetNo].itemsMap.set(uniqueKey, processedLog);
+                    if (date > groups[assetNo].lastUpdate) {
+                        groups[assetNo].lastUpdate = date;
+                    }
                 }
             });
-            let logs = Array.from(uniqueLogsMap.values());
 
-            if (state.referenceSearchQuery) {
-                const q = state.referenceSearchQuery.toLowerCase();
-                logs = logs.filter(log => Object.values(log).some(v => (v || '').toString().toLowerCase().includes(q)));
-            }
-
-            const groups = {};
-            logs.forEach(log => {
-                const assetNo = getVal(log, 'asset_number') || 'Unknown';
-                const cjId = getVal(log, 'cj_id');
-                const exUserId = getVal(log, 'ex_user');
-                const user = state.users.find(u => getVal(u, 'cj_id')?.toString() === cjId?.toString());
-                const exUser = state.users.find(u => getVal(u, 'cj_id')?.toString() === exUserId?.toString());
-
-                if (!groups[assetNo]) groups[assetNo] = [];
-                groups[assetNo].push({
-                    ...log,
-                    _assetNo: assetNo,
-                    _dateStr: getVal(log, 'date') || '0000-00-00',
-                    _exUserName: exUser ? getVal(exUser, 'user_name') : (exUserId || ''),
-                    _exUserPart: exUser ? getVal(exUser, 'department') : '',
-                    _joinedName: user ? getVal(user, 'user_name') : (cjId || ''),
-                    _joinedPart: user ? getVal(user, 'department') : ''
-                });
-            });
-
-            return Object.entries(groups).map(([assetNo, items]) => {
-                const sorted = items.sort((a, b) => a._dateStr.localeCompare(b._dateStr));
-                return { assetNo, logs: sorted, lastUpdate: sorted[sorted.length - 1]._dateStr };
-            }).sort((a, b) => b.lastUpdate.localeCompare(a.lastUpdate)).slice(0, state.referenceLimit);
+            // 2. Convert groups to array, sort by last update, slice, then sort inner logs
+            return Object.values(groups)
+                .sort((a, b) => b.lastUpdate.localeCompare(a.lastUpdate))
+                .slice(0, state.referenceLimit)
+                .map(group => ({
+                    assetNo: group.assetNo,
+                    lastUpdate: group.lastUpdate,
+                    logs: Array.from(group.itemsMap.values()).sort((a, b) => a._dateStr.localeCompare(b._dateStr))
+                }));
         },
 
         departments: (state) => ['전체', ...Array.from(new Set(state.assets.map(a => a.department).filter(Boolean))).sort()],
@@ -133,6 +138,25 @@ export const useAssetStore = defineStore('asset', {
             return stats;
         },
 
+        tradeLogGroupCount: (state) => {
+            const q = state.referenceSearchQuery.toLowerCase();
+            const groups = new Set();
+            state.globalTradeLogs.forEach(log => {
+                const assetNo = log._assetNo || 'Unknown';
+                const cjId = log._cjId || '';
+                const date = log._dateStr || '0000-00-00';
+
+                // Fast search check if query exists
+                if (q) {
+                    const match = [assetNo, cjId, date, log._note, log._exUserId]
+                        .some(v => (v || '').toString().toLowerCase().includes(q));
+                    if (!match) return;
+                }
+                groups.add(assetNo);
+            });
+            return groups.size;
+        },
+
         progress: (state) => {
             const total = state.assets.length;
             const done = state.assets.filter(a => a.status === 'checked').length;
@@ -143,29 +167,42 @@ export const useAssetStore = defineStore('asset', {
     actions: {
         _getVal(obj, key) {
             if (!obj || typeof obj !== 'object') return null;
-            const aliases = {
-                asset_number: ['assetnumber', '자산번호', '관리번호', 'assetno', 'no', '관리no'],
-                in_user: ['inuser', '사용자id', '사번', 'id', 'cjid', 'user_id', '인사번호', 'in_user'],
-                user_name: ['username', '사용자', '성함', '성명', '이름', 'name', 'user'],
-                department: ['department', '부서', '소속', 'part', '팀', '팀명', '부서명'],
-                model_name: ['modelname', '모델명', '모델', '품명', '자산명', '기종', '모델코드', 'model'],
-                serial_number: ['serialnumber', 'sn', 's/n', '시리얼', '제조번호', 'serial_number'],
-                category: ['category', '카테고리', '분류', '자산분류'],
-                state: ['state', '상태', '구분', '자산구분'],
-                status: ['status', '실사상태', '진행상태'],
-                inspection_time: ['inspectiontime', '실사시간', '점검시간', '시간'],
-                ex_user: ['ex_user', '이전에사용하던사람', '이전사용자', 'asset_in_user', 'prev_user'],
-                cj_id: ['cjid', '사번', 'id', 'cj_id'],
-                date: ['date', '업무일자', '일자', '날짜', 'timestamp'],
-                note: ['note', '메모', '비고', '사항']
-            };
-            const targetAliases = (aliases[key] || [key.toLowerCase()]).map(t => t.toLowerCase().replace(/[\s_]/g, ''));
+            if (!this._aliasCache) this._aliasCache = {};
+            if (!this._aliasCache[key]) {
+                const aliases = {
+                    asset_number: ['assetnumber', '자산번호', '관리번호', 'assetno', 'no', '관리no'],
+                    in_user: ['inuser', '사용자id', '사번', 'id', 'cjid', 'user_id', '인사번호', 'in_user'],
+                    user_name: ['username', '사용자', '성함', '성명', '이름', 'name', 'user'],
+                    department: ['department', '부서', '소속', 'part', '팀', '팀명', '부서명'],
+                    model_name: ['modelname', '모델명', '모델', '품명', '자산명', '기종', '모델코드', 'model'],
+                    serial_number: ['serialnumber', 'sn', 's/n', '시리얼', '제조번호', 'serial_number'],
+                    category: ['category', '카테고리', '분류', '자산분류'],
+                    state: ['state', '상태', '구분', '자산구분'],
+                    status: ['status', '실사상태', '진행상태'],
+                    inspection_time: ['inspectiontime', '실사시간', '점검시간', '시간'],
+                    ex_user: ['ex_user', '이전에사용하던사람', '이전사용자', 'asset_in_user', 'prev_user'],
+                    cj_id: ['cjid', '사번', 'id', 'cj_id', '사용자id', '사용자사번'],
+                    date: ['date', '업무일자', '일자', '날짜', 'timestamp', '수정일', '변경일', '작업일자', '시간', '수정시간', '생성일'],
+                    note: ['note', '메모', '비고', '사항']
+                };
+                this._aliasCache[key] = (aliases[key] || [key.toLowerCase()]).map(t => t.toLowerCase().replace(/[\s_]/g, ''));
+            }
+
+            const targetAliases = this._aliasCache[key];
             const keys = Object.keys(obj);
-            const actualKey = keys.find(k => {
-                const normalized = k.toLowerCase().replace(/[\s_]/g, '');
-                return targetAliases.includes(normalized);
-            });
+            const actualKey = keys.find(k => targetAliases.includes(k.toLowerCase().replace(/[\s_]/g, '')));
             return actualKey ? obj[actualKey] : null;
+        },
+
+        _normalizeLog(log) {
+            return {
+                ...log,
+                _assetNo: this._getVal(log, 'asset_number') || 'Unknown',
+                _cjId: this._getVal(log, 'cj_id')?.toString() || '',
+                _dateStr: this._getVal(log, 'date') || '0000-00-00',
+                _exUserId: this._getVal(log, 'ex_user')?.toString() || '',
+                _note: this._getVal(log, 'note') || ''
+            };
         },
 
         setAssets(data) {
@@ -184,9 +221,16 @@ export const useAssetStore = defineStore('asset', {
             if (rawUsers.length > 0) this.users = rawUsers;
             if (rawTrade.length > 0) this.tradeLogs = rawTrade;
 
+            // Create a user map for O(1) lookup during asset processing
+            const usersByCjId = new Map();
+            this.users.forEach(u => {
+                const cid = this._getVal(u, 'cj_id')?.toString()?.trim();
+                if (cid) usersByCjId.set(cid, u);
+            });
+
             // 2. Join Assets with Users and DEDUPLICATE by assetNumber
             const seen = new Set();
-            this.assets = [];
+            const processedAssets = [];
 
             rawAssets.forEach(asset => {
                 const assetNo = this._getVal(asset, 'asset_number');
@@ -195,13 +239,10 @@ export const useAssetStore = defineStore('asset', {
                 if (!assetNo || seen.has(assetNo) || (state && state.toLowerCase() === 'termination')) return;
                 seen.add(assetNo);
 
-                const inUser = this._getVal(asset, 'in_user');
-                const user = this.users.find(u => {
-                    const cid = this._getVal(u, 'cj_id');
-                    return cid && inUser && cid.toString().trim() === inUser.toString().trim();
-                });
+                const inUser = this._getVal(asset, 'in_user')?.toString()?.trim();
+                const user = inUser ? usersByCjId.get(inUser) : null;
 
-                this.assets.push({
+                processedAssets.push({
                     ...asset,
                     category: this._getVal(asset, 'category') || '',
                     modelName: this._getVal(asset, 'model_name') || this._getVal(asset, 'model') || '',
@@ -219,6 +260,7 @@ export const useAssetStore = defineStore('asset', {
                 });
             });
 
+            this.assets = processedAssets;
             console.log(`[Store] Final assets joined and deduped: ${this.assets.length}`);
         },
 
@@ -241,10 +283,31 @@ export const useAssetStore = defineStore('asset', {
                     throw new Error('마스터 파일에서 자산 정보를 찾을 수 없습니다.');
                 }
 
-                // 2. Create the flat result file
-                const sessionFile = await googleApi.createSessionFile(masterFile.id, sessionName, assetsOnly);
+                // 2. Map assets to include user info (make session file self-contained)
+                const processedAssets = assetsOnly.map(asset => {
+                    const inUser = this._getVal(asset, 'in_user');
+                    const user = this.users.find(u => {
+                        const cid = this._getVal(u, 'cj_id');
+                        return cid && inUser && cid.toString().trim() === inUser.toString().trim();
+                    });
 
-                // 3. Refresh session list and load the new session
+                    // _headers가 공유 참조일 수 있으므로 복사하여 수정
+                    const newHeaders = asset._headers ? [...asset._headers] : [];
+                    if (!newHeaders.includes('user_name')) newHeaders.push('user_name');
+                    if (!newHeaders.includes('department')) newHeaders.push('department');
+
+                    return {
+                        ...asset,
+                        _headers: newHeaders,
+                        user_name: user ? this._getVal(user, 'user_name') : (this._getVal(asset, 'user_name') || ''),
+                        department: user ? this._getVal(user, 'department') : (this._getVal(asset, 'department') || '')
+                    };
+                });
+
+                // 3. Create the flat result file with processed assets
+                const sessionFile = await googleApi.createSessionFile(masterFile.id, sessionName, processedAssets);
+
+                // 4. Refresh session list and load the new session
                 await this.refreshSessions();
                 await this.loadProject(sessionFile);
             } catch (err) {
@@ -325,6 +388,8 @@ export const useAssetStore = defineStore('asset', {
             this.currentFile = null;
             this.scannedAssetIds = [];
             this.globalTradeLogs = [];
+            this.pendingTradeLogs = [];
+            this.needsDailySync = false;
         },
 
         clearScannedList() {
@@ -362,19 +427,28 @@ export const useAssetStore = defineStore('asset', {
                 if (!token) throw new Error('토큰을 입력해주세요.');
                 googleApi.setToken(token);
 
-                // Fetch both lists and global logs in parallel
-                await Promise.all([
-                    this.refreshMasters(),
-                    this.refreshSessions(),
-                    this.refreshGlobalTradeLogs()
-                ]);
                 this.isAuthenticated = true;
+                // 토큰 갱신 타이머 불필요 (동기화 시에만 토큰 사용)
 
-                // Save token for persistence
-                localStorage.setItem('google_access_token', token);
-                console.log(`Found ${this.masterFiles.length} masters and ${this.sessionFiles.length} existing sessions`);
+                // 0. Normalize existing cached logs if any
+                this.normalizeLocalLogs();
+
+                // 로컬 캐시에서만 데이터 로드 (API 호출 없음)
+                this._loadFromLocalCache();
+
+                // 하루 1회 동기화 필요 여부 체크 (자동 실행하지 않음)
+                this._checkDailySyncNeeded();
+
+                // 2. 앱 최초 설치 / 데이터가 전혀 없는 경우 초기 동기화 자동 실행
+                if (this.masterFiles.length === 0) {
+                    console.log('[Store] No cached data found. Starting initial sync...');
+                    await this.performDailySync();
+                }
+
+                console.log(`[Store] Initialized from local cache. Masters=${this.masterFiles.length}, Sessions=${this.sessionFiles.length}, Assets=${this.assets.length}`);
             } catch (err) {
                 this.handleAuthError(err);
+                this.isAuthenticated = false;
             } finally {
                 this.loading = false;
             }
@@ -389,38 +463,63 @@ export const useAssetStore = defineStore('asset', {
         },
         async loadProject(file) {
             this.error = null;
+            this.loading = true;
             try {
                 this.currentFile = file;
                 localStorage.setItem('current_session_file', JSON.stringify(file));
 
-                // 1. 만약 현재 선택한 파일이 로컬 캐시와 같다면, 통신 없이 즉시 UI 보여주기
-                if (this.assets.length > 0) {
-                    this.loading = false; // 화면 프리징 방지
-                } else {
-                    this.loading = true; // 캐시가 아예 없는 경우만 로딩 표시
+                this.showToast('회차 데이터를 가져오는 중입니다...', 'info');
+                try {
+                    // 구글 드라이브에서 회차 파일 데이터 다운로드
+                    const sessionData = await googleApi.fetchSheetData(file.id);
+                    const sessionAssets = sessionData.filter(item => item._type === 'assets' || item._sheetName === 'Sheet1' || item._sheetName === 'assets');
+                    
+                    if (sessionAssets.length > 0) {
+                        if (this.assets.length === 0) {
+                            // 로컬 캐시가 완전히 비어있다면 세션 데이터를 기반으로 초기화
+                            this.setAssets(sessionData);
+                        } else {
+                            // 기존 로컬 캐시(마스터 기준)에 세션의 실사 데이터 병합
+                            const sessionMap = new Map();
+                            sessionAssets.forEach(a => {
+                                const assetNo = this._getVal(a, 'asset_number');
+                                if (assetNo) sessionMap.set(assetNo, a);
+                            });
+
+                            this.assets = this.assets.map(asset => {
+                                const assetNo = asset.assetNumber || this._getVal(asset, 'asset_number');
+                                const saved = sessionMap.get(assetNo);
+                                if (saved) {
+                                    return {
+                                        ...asset,
+                                        status: (this._getVal(saved, 'status') || 'pending').toLowerCase(),
+                                        inspection_time: this._getVal(saved, 'inspection_time') || '',
+                                        note: this._getVal(saved, 'note') || ''
+                                    };
+                                }
+                                return asset;
+                            });
+                        }
+
+                        // 스캔된 ID 목록 복구
+                        this.scannedAssetIds = this.assets
+                            .filter(a => a.status === 'checked' && a.assetNumber)
+                            .map(a => a.assetNumber);
+
+                        this._persistSession();
+                        this.showToast('회차 데이터를 성공적으로 불러왔습니다.', 'success');
+                    } else {
+                        this.showToast('선택한 회차에 데이터가 없습니다.', 'warning');
+                    }
+                } catch (fetchErr) {
+                    console.error('[Store] Failed to fetch session data:', fetchErr);
+                    this.showToast('회차 데이터를 가져오지 못했습니다. 로컬 캐시를 사용합니다.', 'warning');
                 }
 
-                // 2. 배경에서 최신 데이터 가져오기 (Background Sync)
-                googleApi.fetchSheetData(file.id).then(sessionData => {
-                    this.setAssets(sessionData);
-                    // 더 이상 모든 'checked' 자산을 scannedAssetIds에 자동으로 넣지 않습니다.
-                    // (작업 중인 '실사 목록'에만 집중하기 위함)
-                    this._persistSession();
-                    console.log(`[Sync] Session data updated from Google for: ${file.name}`);
-                }).catch(err => {
-                    console.error('[Sync] Failed to background update session:', err);
-                });
-
-                // 3. 마스터 데이터(인사정보) 동기화 체크 (배경 작업)
-                this.checkAndSyncMaster();
-
-                // 4. 전역 이력 데이터 즉시 로드 시도
-                this.refreshGlobalTradeLogs();
-
+                this.needsDailySync = false;
             } catch (err) {
                 this.handleAuthError(err);
             } finally {
-                // Background fetch이므로 finally에서 loading을 끄지 않고 즉시 끕니다.
                 this.loading = false;
             }
         },
@@ -545,9 +644,10 @@ export const useAssetStore = defineStore('asset', {
                 const logs = await googleApi.fetchGlobalTradeLogs();
                 console.log(`[Store] Logs received: ${logs.length}`);
                 if (logs && logs.length > 0) {
-                    this.globalTradeLogs = logs;
+                    // Normalize all logs once upon receipt
+                    this.globalTradeLogs = logs.map(log => this._normalizeLog(log));
                     localStorage.setItem('cached_global_trade_logs', JSON.stringify(this.globalTradeLogs));
-                    console.log('[Store] Global trade logs updated in state and storage');
+                    console.log('[Store] Global trade logs updated and normalized');
                 } else {
                     console.warn('[Store] No logs returned from API');
                 }
@@ -556,9 +656,16 @@ export const useAssetStore = defineStore('asset', {
             }
         },
 
+        normalizeLocalLogs() {
+            if (this.globalTradeLogs && this.globalTradeLogs.length > 0 && !this.globalTradeLogs[0]._assetNo) {
+                console.log('[Store] Normalizing legacy cached logs...');
+                this.globalTradeLogs = this.globalTradeLogs.map(log => this._normalizeLog(log));
+            }
+        },
+
         async logAssetChange(assetNumber, newCjId, exUserCjId, note = '') {
             try {
-                const log = {
+                const logData = {
                     date: new Date().toISOString().split('T')[0],
                     asset_number: assetNumber,
                     cj_id: newCjId,
@@ -566,52 +673,29 @@ export const useAssetStore = defineStore('asset', {
                     note: note
                 };
 
-                // 1. 서버에 즉시 전송 시도
-                await googleApi.appendGlobalTradeLog(log);
+                // 로컬 큐에만 저장 (구글 API 전송은 performDailySync에서 일괄 수행)
+                this.pendingTradeLogs.push(logData);
+                localStorage.setItem('pending_trade_logs', JSON.stringify(this.pendingTradeLogs));
 
-                // 2. 성공하면 로컬 상태에도 추가 (새로고침 전에도 보이게)
-                this.globalTradeLogs.push({
-                    ...log,
+                // 로컬 상태에도 추가 (UI 즉시 반영)
+                const normalized = this._normalizeLog({
+                    ...logData,
                     _type: 'trade',
                     _sheetName: 'Global_Trade'
                 });
+                this.globalTradeLogs.push(normalized);
                 localStorage.setItem('cached_global_trade_logs', JSON.stringify(this.globalTradeLogs));
 
-                console.log(`[Store] Global trade log appended for ${assetNumber}`);
+                console.log(`[Store] Trade log queued locally for ${assetNumber} (pending: ${this.pendingTradeLogs.length})`);
             } catch (err) {
-                console.error('[Store] Failed to log asset change globally:', err);
-                this.showToast('변경 이력 기록 실패', 'error');
+                console.error('[Store] Failed to queue asset change:', err);
+                this.showToast('변경 이력 저장 실패', 'error');
             }
         },
 
-        async checkAndSyncMaster() {
-            if (!this.isAuthenticated) return;
-
-            const now = new Date();
-            const lastSync = this.lastMasterSync ? new Date(this.lastMasterSync) : new Date(0);
-            const needsInitial = this.users.length === 0;
-
-            // Create a threshold for today's 06:00 AM
-            const threshold = new Date();
-            threshold.setHours(6, 0, 0, 0);
-
-            // If current time is before 06:00 AM today, the 'today's sync window' hasn't opened yet.
-            // We should check against YESTERDAY'S 06:00 AM.
-            if (now < threshold) {
-                threshold.setDate(threshold.getDate() - 1);
-            }
-
-            // If last sync was before the relevant 06:00 AM threshold, or we have no user data, refresh.
-            if (needsInitial || lastSync < threshold) {
-                console.log(`Master sync ${needsInitial ? 'initial' : 'required'} (Last: ${lastSync.toLocaleString()}, Threshold: ${threshold.toLocaleString()})`);
-                await this.refreshMasterMetadata();
-            } else {
-                console.log(`Master sync not needed (Updated at ${lastSync.toLocaleString()})`);
-            }
-        },
 
         /**
-         * 지연 저장 트리거: 3초 동안 추가 입력이 없으면 구글 시트에 저장합니다.
+         * 지연 저장 트리거: 3초 동안 추가 입력이 없으면 로컬에 저장합니다.
          */
         triggerDebouncedSave() {
             if (this.saveTimeout) {
@@ -623,33 +707,17 @@ export const useAssetStore = defineStore('asset', {
         },
 
         /**
-         * 백그라운드 저장: UI 로딩(this.loading)을 건드리지 않고 조용히 저장합니다.
+         * 백그라운드 저장: 로컬 스토리지에만 저장합니다. (구글 API 호출 없음)
+         * 구글 시트 업로드는 performDailySync()에서 일괄 수행합니다.
          */
         async saveDataInBackground() {
-            if (!this.currentFile || this.isSyncing) return;
+            if (!this.currentFile) return;
 
-            if (!this.isOnline) {
-                console.log('[Sync] Offline: Change queued for later sync');
-                return;
-            }
-
-            this.isSyncing = true;
-            try {
-                const sessionAssets = this.assets.filter(a => a._type === 'assets');
-                await googleApi.updateSheet(this.currentFile.id, sessionAssets);
-                this.lastSavedAt = new Date().toLocaleTimeString();
-                this.hasPendingSync = false;
-                localStorage.setItem('has_pending_sync', 'false');
-                console.log('[Sync] Background save completed at', this.lastSavedAt);
-            } catch (err) {
-                console.error('[Sync] Background save failed:', err);
-                if (err.message.includes('fetch') || err.message.includes('network')) {
-                    this.isOnline = false;
-                }
-            } finally {
-                this.isSyncing = false;
-                this.saveTimeout = null;
-            }
+            this.hasPendingSync = true;
+            localStorage.setItem('has_pending_sync', 'true');
+            this._persistSession();
+            this.lastSavedAt = new Date().toLocaleTimeString();
+            console.log('[Sync] Saved locally at', this.lastSavedAt);
         },
 
         async saveData() {
@@ -695,26 +763,156 @@ export const useAssetStore = defineStore('asset', {
 
         async handleAuthError(err) {
             this.error = err.message;
-            if (err.message.includes('[AUTH_EXPIRED]')) {
-                console.warn('[Store] Auth expired, attempting silent recovery...');
-                try {
-                    // 1. Silent refresh 시도
-                    await googleApi.refreshAccessToken();
-                    // 2. 성공 시 에러 초기화 (UI는 중단 없이 유지됨)
-                    this.error = null;
-                    this.showToast('연결이 재설정되었습니다. (자동 갱신)', 'info');
-                    console.log('[Store] Silent recovery success.');
-                    return; // 성공했으므로 로그아웃 로직 건너뜀
-                } catch (retryErr) {
-                    console.error('[Store] Silent recovery failed:', retryErr);
-                    // 갱신 실패 시에만 실제 로그아웃 처리
-                    this.isAuthenticated = false;
-                    localStorage.removeItem('google_access_token');
-                    this.showToast('인증이 만료되어 다시 로그인이 필요합니다.', 'error');
-                }
+            if (err.message.includes('[AUTH_EXPIRED]') || err.message.includes('[AUTH_REQUIRED]')) {
+                console.warn('[Store] Authentication failed or expired.');
+                this.isAuthenticated = false;
+                localStorage.removeItem('google_access_token');
+                this.showToast('인증이 만료되어 다시 로그인이 필요합니다.', 'error');
             } else {
                 console.error('API Error:', err);
                 this.showToast('오류 발생: ' + err.message, 'error');
+            }
+        },
+
+        /**
+         * 로컬 캐시에서 파일 목록 및 데이터 로드 (API 호출 없음)
+         */
+        _loadFromLocalCache() {
+            // 마스터/세션 파일 목록은 localStorage에서 복원
+            const cachedMasters = localStorage.getItem('cached_master_files');
+            const cachedSessions = localStorage.getItem('cached_session_files');
+            if (cachedMasters) {
+                try { this.masterFiles = JSON.parse(cachedMasters); } catch(e) { this.masterFiles = []; }
+            }
+            if (cachedSessions) {
+                try { this.sessionFiles = JSON.parse(cachedSessions); } catch(e) { this.sessionFiles = []; }
+            }
+            // assets, users, tradeLogs, globalTradeLogs는 이미 state 초기화에서 localStorage로부터 로드됨
+            console.log('[Store] Loaded from local cache.');
+        },
+
+        /**
+         * 하루 1회 동기화 필요 여부 체크 (자동 실행하지 않음, UI 알림만)
+         */
+        _checkDailySyncNeeded() {
+            const now = new Date();
+            const lastSync = this.lastMasterSync ? new Date(this.lastMasterSync) : null;
+            const isDifferentDay = !lastSync || now.toDateString() !== lastSync.toDateString();
+            const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+            if (!lastSync || isDifferentDay || (now - lastSync > ONE_DAY_MS)) {
+                this.needsDailySync = true;
+                const reason = !lastSync ? '동기화 기록 없음' : isDifferentDay ? '날짜 변경' : '24시간 경과';
+                console.log(`[Store] Daily sync needed: ${reason}`);
+                this.showToast(`동기화 권장: ${reason}. 설정에서 동기화를 실행하세요.`, 'info');
+            } else {
+                this.needsDailySync = false;
+                console.log(`[Store] Daily sync not needed. Last: ${lastSync.toLocaleString()}`);
+            }
+        },
+
+        /**
+         * 하루 1회 전체 동기화 (이 함수에서만 구글 API 접속)
+         * 1. 토큰 갱신
+         * 2. 로컬 pending 이력 업로드
+         * 3. 현재 세션 저장
+         * 4. 마스터 데이터 다운로드
+         * 5. 전역 이력 다운로드
+         * 6. 파일 목록 갱신
+         */
+        async performDailySync() {
+            if (this.isSyncingMaster) {
+                this.showToast('이미 동기화가 진행 중입니다.', 'info');
+                return;
+            }
+
+            this.isSyncingMaster = true;
+            this.loading = true;
+            this.error = null;
+
+            try {
+                // 1. 토큰 갱신 (동기화 시에만 인증 시도)
+                this.showToast('토큰 갱신 중...', 'info');
+                const newToken = await googleApi.refreshAccessToken();
+                if (newToken) {
+                    localStorage.setItem('google_access_token', newToken);
+                }
+
+                // 2. 로컬 pending 이력 업로드
+                if (this.pendingTradeLogs.length > 0) {
+                    this.showToast(`대기 중인 이력 ${this.pendingTradeLogs.length}건 업로드 중...`, 'info');
+                    await this._uploadPendingTradeLogs();
+                }
+
+                // 3. 현재 세션 변경사항 업로드
+                if (this.currentFile && this.hasPendingSync) {
+                    this.showToast('세션 데이터 업로드 중...', 'info');
+                    const sessionAssets = this.assets.filter(a => a._type === 'assets');
+                    await googleApi.updateSheet(this.currentFile.id, sessionAssets);
+                    this.hasPendingSync = false;
+                    localStorage.setItem('has_pending_sync', 'false');
+                    console.log('[DailySync] Session data uploaded.');
+                }
+
+                // 4. 마스터 데이터 동기화 (refreshMasterMetadata 재사용)
+                this.showToast('마스터 데이터 동기화 중...', 'info');
+                await this.refreshMasterMetadata();
+
+                // 5. 파일 목록 갱신 및 캐시 저장
+                await this.refreshMasters();
+                await this.refreshSessions();
+                localStorage.setItem('cached_master_files', JSON.stringify(this.masterFiles));
+                localStorage.setItem('cached_session_files', JSON.stringify(this.sessionFiles));
+
+                // 6. 최신 토큰 저장
+                const latestToken = googleApi.accessToken;
+                if (latestToken) {
+                    localStorage.setItem('google_access_token', latestToken);
+                }
+
+                // 7. 동기화 완료
+                this.needsDailySync = false;
+                this.showToast('전체 동기화가 완료되었습니다!', 'success');
+                console.log('[DailySync] Full sync completed successfully.');
+
+            } catch (err) {
+                console.error('[DailySync] Failed:', err);
+                this.handleAuthError(err);
+            } finally {
+                this.isSyncingMaster = false;
+                this.loading = false;
+            }
+        },
+
+        /**
+         * 로컬에 쌓인 대기 중인 이력 로그를 구글 시트에 일괄 업로드
+         */
+        async _uploadPendingTradeLogs() {
+            if (this.pendingTradeLogs.length === 0) return;
+
+            try {
+                for (const log of this.pendingTradeLogs) {
+                    await googleApi.appendGlobalTradeLog(log);
+                }
+                console.log(`[DailySync] Uploaded ${this.pendingTradeLogs.length} pending trade logs.`);
+                // 업로드 성공 시 큐 비우기
+                this.pendingTradeLogs = [];
+                localStorage.setItem('pending_trade_logs', '[]');
+            } catch (err) {
+                console.error('[DailySync] Failed to upload pending trade logs:', err);
+                this.showToast('이력 업로드 중 오류 발생', 'error');
+                throw err; // 상위에서 처리
+            }
+        },
+
+        /**
+         * 토큰 갱신 타이머 중지 (더 이상 사용하지 않지만 호환성 유지)
+         */
+        stopTokenRefreshTimer() {
+            if (this.tokenRefreshTimer) {
+                clearInterval(this.tokenRefreshTimer);
+                this.tokenRefreshTimer = null;
+                console.log('[Store] Token refresh timer stopped.');
             }
         }
     }
