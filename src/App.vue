@@ -36,6 +36,7 @@ import {
 } from 'lucide-vue-next'
 import { Network } from '@capacitor/network'
 import { Keyboard } from '@capacitor/keyboard'
+import { BarcodeScanner } from '@capacitor-mlkit/barcode-scanning'
 import AssetCard from './components/AssetCard.vue'
 
 const store = useAssetStore()
@@ -193,6 +194,31 @@ watch(() => store.isAuthenticated, (val) => {
 const barcodeValue = ref('')
 const accessTokenInput = ref('')
 const showLogin = ref(true)
+
+const startBarcodeScan = async () => {
+  try {
+    const status = await BarcodeScanner.checkPermissions()
+    if (status.camera !== 'granted') {
+      const requestStatus = await BarcodeScanner.requestPermissions()
+      if (requestStatus.camera !== 'granted') {
+        store.showToast('카메라 권한이 필요합니다.', 'error')
+        return
+      }
+    }
+
+    const { barcodes } = await BarcodeScanner.scan()
+    if (barcodes && barcodes.length > 0) {
+      const scannedCode = barcodes[0].rawValue
+      if (scannedCode) {
+        barcodeValue.value = scannedCode
+        await handleBarcodeEnter()
+      }
+    }
+  } catch (error) {
+    console.error('Barcode scan error:', error)
+    store.showToast('바코드 스캔 중 오류가 발생했습니다.', 'error')
+  }
+}
 
 const handleLogin = async () => {
   if (!accessTokenInput.value) {
@@ -529,6 +555,9 @@ const handleTrackAsset = (assetNumber) => {
         <button v-if="store.inspectionSearchQuery || barcodeValue" @click="clearInspectionSearch" class="clear-filter-btn">
           <X size="18" />
         </button>
+        <button type="button" @click="startBarcodeScan" class="scan-btn" title="카메라로 바코드 스캔">
+          <Scan size="18" />
+        </button>
         <button v-if="!store.inspectionSearchQuery && !barcodeValue && store.scannedAssets && store.scannedAssets.length > 0" @click="handleConfirm" class="confirm-btn">
           비우기
         </button>
@@ -821,6 +850,21 @@ const handleTrackAsset = (assetNumber) => {
 </template>
 
 <style scoped>
+.scan-btn {
+  background: transparent;
+  color: var(--primary);
+  padding: 6px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 8px;
+}
+
+.scan-btn:active {
+  background: rgba(79, 70, 229, 0.1);
+}
+
 .header {
   margin: 0;
   padding: calc(10px + env(safe-area-inset-top)) 16px 10px 16px;

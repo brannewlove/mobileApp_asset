@@ -1,6 +1,10 @@
 apply plugin: 'com.android.application'
 
 android {
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
     namespace = "com.antigravity.assetmanager"
     compileSdk = rootProject.ext.compileSdkVersion
     defaultConfig {
@@ -21,10 +25,6 @@ android {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
-    }
-    lintOptions {
-        abortOnError false
-        checkReleaseBuilds false
     }
 }
 
