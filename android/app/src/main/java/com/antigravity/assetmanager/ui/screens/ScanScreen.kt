@@ -24,6 +24,8 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -66,8 +68,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -120,23 +129,68 @@ fun ScanScreen(
         hasCameraPermission = isGranted
     }
 
-    LaunchedEffect(Unit) {
-        if (!hasCameraPermission) {
-            permissionLauncher.launch(Manifest.permission.CAMERA)
-        }
-    }
-
     var manualInput by remember { mutableStateOf("") }
     var isCameraActive by remember { mutableStateOf(false) }
     var isTorchOn by remember { mutableStateOf(false) }
     var showClearRecordsDialog by remember { mutableStateOf(false) }
 
     val listState = rememberLazyListState()
+    val inputFocusRequester = remember { FocusRequester() }
+    val inputInteractionSource = remember { MutableInteractionSource() }
 
-    // 자산 스캔/등록 완료(또는 재스캔으로 시간 갱신) 시 최상단 0번 항목으로 자동 스크롤
+    // 사용자가 입력창을 직접 터치/선택했을 때 스크린 키보드 강제 팝업
+    LaunchedEffect(inputInteractionSource) {
+        inputInteractionSource.interactions.collect { interaction ->
+            if (interaction is PressInteraction.Release) {
+                keyboardController?.show()
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (!hasCameraPermission) {
+            permissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+        if (!isCameraActive) {
+            runCatching {
+                inputFocusRequester.requestFocus()
+                keyboardController?.hide()
+            }
+        }
+    }
+
+    LaunchedEffect(isCameraActive) {
+        if (!isCameraActive) {
+            runCatching {
+                inputFocusRequester.requestFocus()
+                keyboardController?.hide()
+            }
+        }
+    }
+
+    // 자산 스캔/등록 완료 시 최상단 0번 항목으로 스크롤 및 입력창 포커스 유지 (스크린 키보드는 숨김)
     LaunchedEffect(scannedAssets.firstOrNull()?.assetNumber, scannedAssets.firstOrNull()?.inspectionTime) {
         if (scannedAssets.isNotEmpty()) {
             listState.animateScrollToItem(0)
+        }
+        if (!isCameraActive) {
+            runCatching {
+                inputFocusRequester.requestFocus()
+                keyboardController?.hide()
+            }
+        }
+    }
+
+    val handleBarcodeScan: (String) -> Unit = { rawBarcode ->
+        val trimmed = rawBarcode.trim()
+        if (trimmed.isNotBlank()) {
+            manualInput = ""
+            onBarcodeScanned(trimmed)
+        }
+        // 스캔 완료 후 포커스만 입력창으로 유지하고 스크린 키보드는 숨김
+        runCatching {
+            inputFocusRequester.requestFocus()
+            keyboardController?.hide()
         }
     }
 
@@ -251,37 +305,77 @@ fun ScanScreen(
                     .padding(horizontal = 16.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 슬림 수동 바코드 입력창
+                // 슬림 바코드 입력창 (직접 선택 시 키보드 팝업, 스캔 시 키보드 숨김 & 포커스 유지)
                 Box(
                     modifier = Modifier
                         .weight(1f)
                         .height(40.dp)
                         .background(AppColors.BgCardSolid, RoundedCornerShape(8.dp))
                         .border(1.dp, AppColors.BorderGlass, RoundedCornerShape(8.dp))
+                        .clickable {
+                            runCatching {
+                                inputFocusRequester.requestFocus()
+                                keyboardController?.show()
+                            }
+                        }
                         .padding(horizontal = 10.dp),
                     contentAlignment = Alignment.CenterStart
                 ) {
                     if (manualInput.isEmpty()) {
-                        Text("직접 입력...", color = AppColors.TextMuted, fontSize = 13.sp)
+                        Text("직접 입력 또는 바코드 스캔...", color = AppColors.TextMuted, fontSize = 13.sp)
                     }
                     BasicTextField(
                         value = manualInput,
-                        onValueChange = { manualInput = it },
+                        onValueChange = { newValue ->
+                            if (newValue.contains('\n') || newValue.contains('\r')) {
+                                val cleaned = newValue.replace("\r", "").replace("\n", "").trim()
+                                if (cleaned.isNotBlank()) {
+                                    handleBarcodeScan(cleaned)
+                                } else {
+                                    manualInput = ""
+                                    runCatching {
+                                        inputFocusRequester.requestFocus()
+                                        keyboardController?.hide()
+                                    }
+                                }
+                            } else {
+                                manualInput = newValue
+                            }
+                        },
+                        interactionSource = inputInteractionSource,
                         singleLine = true,
                         textStyle = TextStyle(color = AppColors.TextMain, fontSize = 13.sp),
                         cursorBrush = SolidColor(AppColors.Primary),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                         keyboardActions = KeyboardActions(
                             onDone = {
-                                keyboardController?.hide()
-                                focusManager.clearFocus()
                                 if (manualInput.isNotBlank()) {
-                                    onBarcodeScanned(manualInput.trim())
-                                    manualInput = ""
+                                    handleBarcodeScan(manualInput)
+                                } else {
+                                    runCatching {
+                                        inputFocusRequester.requestFocus()
+                                        keyboardController?.hide()
+                                    }
                                 }
                             }
                         ),
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(inputFocusRequester)
+                            .onKeyEvent { keyEvent ->
+                                if (keyEvent.type == KeyEventType.KeyUp &&
+                                    (keyEvent.key == Key.Enter || keyEvent.key == Key.NumPadEnter)
+                                ) {
+                                    if (manualInput.isNotBlank()) {
+                                        handleBarcodeScan(manualInput)
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            }
                     )
                 }
 
